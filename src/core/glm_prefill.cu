@@ -24,6 +24,7 @@
 #include "strata/kernels/dequant_bf16.hpp"
 #include "strata/kernels/exl3.hpp"
 #include "strata/kernels/glm_batch.hpp"
+#include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #if defined(STRATA_USE_HIP)
 #include "strata/prefill/gemm.hpp"
@@ -3192,8 +3193,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                             xin[j].resize(tl.size() * (size_t) E);
                             for (size_t q = 0; q < tl.size(); ++q) {
                                 const float* src = S->x_h + (size_t) tl[q] * E;
-                                _Float16* dst = (_Float16*) xin[j].data() + q * (size_t) E;
-                                for (int c = 0; c < E; ++c) dst[c] = (_Float16) src[c];
+                                uint16_t* dst = xin[j].data() + q * (size_t) E;
+                                for (int c = 0; c < E; ++c) dst[c] = strata::kernels::f16_from_f32(src[c]);
                             }
                             ans[j].resize(tl.size() * (size_t) E);
                             auto& h = *F->net[j];
@@ -3211,8 +3212,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         if (!iok[j]) { net_ok = false; net_err = ierr[j]; continue; }
                         for (size_t q = 0; q < toks[j].size(); ++q) {
                             float* o = sum + (size_t) toks[j][q] * E;
-                            const _Float16* a = (const _Float16*) ans[j].data() + q * (size_t) E;
-                            for (int c = 0; c < E; ++c) o[c] += (float) a[c];
+                            const uint16_t* a = ans[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) o[c] += strata::kernels::f32_from_f16(a[c]);
                         }
                     }
                     net_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -3247,8 +3248,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         xin[j].resize(tl.size() * (size_t) E);
                         for (size_t q = 0; q < tl.size(); ++q) {
                             const float* src = S->x_h + (size_t) tl[q] * E;
-                            _Float16* dst = (_Float16*) xin[j].data() + q * (size_t) E;
-                            for (int c = 0; c < E; ++c) dst[c] = (_Float16) src[c];
+                            uint16_t* dst = xin[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) dst[c] = strata::kernels::f16_from_f32(src[c]);
                         }
                         ans[j].resize(refs[j].size() * (size_t) E);
                         auto& h = *F->net[j];
@@ -3260,8 +3261,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         }
                         for (size_t q = 0; q < row_of[j].size(); ++q) {
                             float* o = S->out_h + (size_t) (row_of[j][q] - cpu_r0) * E;
-                            const _Float16* a = (const _Float16*) ans[j].data() + q * (size_t) E;
-                            for (int c = 0; c < E; ++c) o[c] = (float) a[c];
+                            const uint16_t* a = ans[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) o[c] = strata::kernels::f32_from_f16(a[c]);
                         }
                     });
                 }
