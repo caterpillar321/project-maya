@@ -4417,6 +4417,15 @@ void Glm5Model::fast_prof_flush() {
         }
         std::fprintf(stderr, "glm prof request CUDA%d: %llu tokens, %.2f ms/token |%s\n", m->dev_,
                      (unsigned long long) F->ptokens, tot / (double) F->ptokens, line.c_str());
+        const double an = (double) std::max<uint64_t>(1, F->audit_forwards);
+        std::fprintf(stderr, "glm audit request CUDA%d: %llu forwards | wall %.3f boundary_host %.3f enqueue_host %.3f "
+                             "wait_host %.3f collect_host %.3f ms/forward | sampling %.3f ms/call (%llu calls)\n",
+                     m->dev_, (unsigned long long) F->audit_forwards, F->audit_wall / an, F->audit_boundary / an,
+                     F->audit_enqueue / an, F->audit_wait / an, F->audit_collect / an,
+                     F->audit_sample / (double) std::max<uint64_t>(1, F->audit_samples),
+                     (unsigned long long) F->audit_samples);
+        F->audit_forwards = F->audit_samples = 0;
+        F->audit_wall = F->audit_boundary = F->audit_enqueue = F->audit_wait = F->audit_collect = F->audit_sample = 0;
         F->pacc.clear();
         F->ptokens = 0;
     }
@@ -6587,6 +6596,10 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     const int64_t p = pos_++;
+    using AuditClock = std::chrono::steady_clock;
+    const bool audit = F->prof_on && F->pseen >= F->pskip;
+    const auto audit_begin = audit ? AuditClock::now() : AuditClock::time_point{};
+    if (F->prof_on) { cudaSetDevice(dev_); F->mark("token_begin"); }
     // between tokens (every device idle): finished promotions go live in the device tables
     Glm5Model* last = this;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
@@ -6594,6 +6607,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
         if (!m->fast_boundary(err)) return false;
         last = m;
     }
+    const auto audit_boundary = audit ? AuditClock::now() : AuditClock::time_point{};
     // the one-GPU MTP decode's NextN cache: its entry p - 1 from the trunk's hidden state of p - 1 and this token (on
     // the part with the block, queued before this token's layers there)
     if (last->mtp_dec_) {
@@ -6635,6 +6649,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
     cudaSetDevice(tail->dev_);
     gf::head_prep(tail->state_, tail->w_.at("output_norm.weight"), g.norm_eps, g.n_embd, FT->head_x, FT->head_xq,
                   FT->cs);
+    if (FT->prof_on) FT->mark("head_prep");
     // GLM_DUMP_H=<file> (debug): append every position's final hidden state (output_norm of the stream mean - what the
     // NextN/MTP block reads) as n_embd floats
     static const char* dh = getenv("GLM_DUMP_H");
@@ -6655,8 +6670,10 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
         err = "glm fast: output head (type " + std::to_string(ow.type) + ")";
         return false;
     }
+    if (FT->prof_on) FT->mark("output_head");
     gf::argmax(tail->sc_ + tail->sc_logits, g.n_vocab, FT->tok, FT->cs);
     cudaMemcpyAsync(FT->tok_h, FT->tok, sizeof(int), cudaMemcpyDeviceToHost, FT->cs);
+    if (FT->prof_on) FT->mark("argmax_readback");
     cudaEventRecord(FT->ev_done, FT->cs);
     // wait for the token (the service threads answer misses meanwhile)
     const auto tw = std::chrono::steady_clock::now();
@@ -6675,6 +6692,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
             }
         }
     }
+    const auto audit_ready = audit ? AuditClock::now() : AuditClock::time_point{};
     if (!glmfast::cuda_ok(done, "glm token completion", err)) return false;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
         if (!m->fast_->route_ok(err)) return false;
@@ -6694,6 +6712,16 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
             cudaSetDevice(m->dev_);
             m->fast_->collect();
         }
+    if (audit) {
+        const auto end = AuditClock::now();
+        const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        ++F->audit_forwards;
+        F->audit_wall += ms(audit_begin, end);
+        F->audit_boundary += ms(audit_begin, audit_boundary);
+        F->audit_enqueue += ms(audit_boundary, tw);
+        F->audit_wait += ms(tw, audit_ready);
+        F->audit_collect += ms(audit_ready, end);
+    }
     cudaSetDevice(dev_);
     return true;
 }
@@ -6802,10 +6830,15 @@ bool Glm5Model::fast_mtp(int64_t p, int32_t next_tok, std::string& err, int step
 // before it takes its next position), so the logits read are the ones just computed.
 int Glm5Model::fast_sample(strata::kernels::SamplerParams& sp, std::string& err) {
     FastState* F = fast_;
+    const auto audit_begin = F->prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     cudaSetDevice(dev_);
     pick_tokens(sc_ + sc_logits, 1, sp, nullptr, 0, d_tok_, F->cs);
     cudaMemcpyAsync(F->tok_h, d_tok_, sizeof(int), cudaMemcpyDeviceToHost, F->cs);
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "glm sampler", err) || !F->route_ok(err)) return -1;
+    if (F->prof_on) {
+        ++F->audit_samples;
+        F->audit_sample += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - audit_begin).count();
+    }
     return F->tok_h[0];
 }
 

@@ -907,6 +907,8 @@ struct Glm5Model::FastState {
         ++pn;
     }
     uint64_t pseen = 0, pskip = 0;   // STRATA_GLM_PROF=<n>: the first n tokens (the cold tiers) are not counted
+    uint64_t audit_forwards = 0, audit_samples = 0;
+    double audit_wall = 0, audit_boundary = 0, audit_enqueue = 0, audit_wait = 0, audit_collect = 0, audit_sample = 0;
     void collect() {
         if (pseen++ < pskip) {
             pn = 0;
