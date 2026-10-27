@@ -52,7 +52,8 @@ def main():
     ap.add_argument('--evaluate', type=Path, action='append', default=[])
     ap.add_argument('--first-layer', type=int, default=19)
     ap.add_argument('--last-layer', type=int, default=44)
-    ap.add_argument('--minimum', type=int, default=28)
+    ap.add_argument('--minimum', type=int, required=True,
+                    help='runtime lendable + kept slot floor; depends on prefill and vision configuration')
     ap.add_argument('--maximum', type=int, default=80)
     ap.add_argument('--spares', type=int, default=3)
     ap.add_argument('--warmup', type=int, default=100)
@@ -67,15 +68,18 @@ def main():
         if line.strip() and not line.lstrip().startswith('#'):
             words = line.split()
             strides[int(words[0])] = (int(words[4]) + 255) // 256 * 256
+    if args.minimum <= args.spares or args.maximum < args.minimum:
+        raise ValueError('invalid capacity range')
+    if not layers or any(not args.minimum <= baseline[l] <= args.maximum for l in layers):
+        raise ValueError('target baseline capacities must be inside the fitted range')
     budget = sum(baseline[l] * strides[l] for l in layers)
     donors = {}
     for layer, count in args.donor:
-        if layer in layers or layer in donors or layer not in baseline or not 0 < count <= baseline[layer]:
-            raise ValueError('donors must be distinct non-target layers with a smaller positive capacity')
+        if (layer in layers or layer in donors or layer not in baseline or
+                not args.minimum <= count <= min(baseline[layer], args.maximum)):
+            raise ValueError('donors must be distinct non-target layers within the floor and existing capacity')
         donors[layer] = count
         budget += (baseline[layer] - count) * strides[layer]
-    if args.minimum <= args.spares or args.maximum < args.minimum:
-        raise ValueError('invalid capacity range')
     paths = list(dict.fromkeys(args.train + args.evaluate))
     curves = {}
     for path in paths:
@@ -108,7 +112,7 @@ def main():
     layout = dict(sorted((donors | slots).items()))
     donor_bytes = sum(c * strides[l] for l, c in donors.items())
     result = {'method': 'approximate LRU on target layers only; helper ownership changes not modeled',
-              'include_cpu_routes': args.include_cpu_routes,
+              'include_cpu_routes': args.include_cpu_routes, 'minimum_slots': args.minimum,
               'training': [str(p) for p in args.train], 'byte_budget': budget + donor_bytes,
               'used_bytes': used + donor_bytes, 'slots': layout, 'comparisons': {}}
     for path in paths:

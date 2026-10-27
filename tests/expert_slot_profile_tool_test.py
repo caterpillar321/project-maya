@@ -36,7 +36,7 @@ class SlotProfileToolTest(unittest.TestCase):
             (root/'trace').write_text(''.join(rows))
             subprocess.run([sys.executable, str(TOOL), '--baseline', str(root/'base.json'),
                             '--native-experts', str(root/'experts'), '--train', str(root/'trace'),
-                            '--first-layer', '19', '--last-layer', '20', '--warmup', '0',
+                            '--first-layer', '19', '--last-layer', '20', '--warmup', '0', '--minimum', '28',
                             '--donor', '3', '28', '--output', str(root/'layout.txt')],
                            check=True, stdout=subprocess.DEVNULL)
             report = json.loads((root/'layout.json').read_text())
@@ -47,6 +47,16 @@ class SlotProfileToolTest(unittest.TestCase):
             used = slots[3] * 512 + (slots[19] + slots[20]) * 256
             self.assertEqual(used, report['used_bytes'])
             self.assertLessEqual(used, 36 * 512 + 72 * 256)
+
+            # A prefill/vision floor applies to donor layers as well.
+            rejected = subprocess.run([sys.executable, str(TOOL), '--baseline', str(root/'base.json'),
+                                       '--native-experts', str(root/'experts'), '--train', str(root/'trace'),
+                                       '--first-layer', '19', '--last-layer', '20', '--minimum', '34',
+                                       '--donor', '3', '28', '--output', str(root/'rejected.txt')],
+                                      capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('within the floor', rejected.stderr)
+            self.assertFalse((root/'rejected.txt').exists())
 
 
 if __name__ == '__main__':

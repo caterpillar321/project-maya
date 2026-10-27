@@ -1379,6 +1379,9 @@ bool Glm5Model::fast_setup(std::string& err) {
             if (!in) { err = "cannot open GLM slot profile: " + std::string(path); return false; }
             int keep = g.n_exp_used + gf::kSpares;
             if (pf_ != nullptr) keep = std::max(keep, pool_keep(g.n_exp_used));
+            // vision_lend frees the entire shared tail, including any extra
+            // slots reserved by prefill. Keep its decode headroom behind that
+            // actual tail, not just behind the encoder's smaller byte request.
             if (vis_lend_ok_) keep = std::max(keep, g.n_exp_used + gf::kSpares + 8);
             std::vector<size_t> strides((size_t) NL, 0);
             for (int il = l0_; il < lt_; ++il)
