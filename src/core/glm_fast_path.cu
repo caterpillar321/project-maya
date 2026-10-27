@@ -18,6 +18,7 @@
 #include "glm_fast_state.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/net_copy_profile.hpp"
+#include "strata/core/expert_slot_profile.hpp"
 #include "strata/core/glm_model.hpp"
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/kernels/copy_lane_policy.hpp"
@@ -1368,6 +1369,27 @@ bool Glm5Model::fast_setup(std::string& err) {
                     used += slot_stride(best);
                 }
             }
+        }
+        if (const char* path = getenv("STRATA_GLM_SLOT_PROFILE"); path != nullptr && *path != '\0') {
+            if (F->complete || F->unified_memory || n_parts_ != 1) {
+                err = "GLM slot profile requires a single discrete trunk with a partial expert pool";
+                return false;
+            }
+            std::ifstream in(path);
+            if (!in) { err = "cannot open GLM slot profile: " + std::string(path); return false; }
+            int keep = g.n_exp_used + gf::kSpares;
+            if (pf_ != nullptr) keep = std::max(keep, pool_keep(g.n_exp_used));
+            if (vis_lend_ok_) keep = std::max(keep, g.n_exp_used + gf::kSpares + 8);
+            std::vector<size_t> strides((size_t) NL, 0);
+            for (int il = l0_; il < lt_; ++il)
+                if (F->L[(size_t) il].moe) strides[(size_t) il] = slot_stride(il);
+            if (!strata::core::apply_expert_slot_profile(in, nsl, strides, k_extra + keep,
+                                                        g.n_expert + gf::kSpares, mtp_il_, err)) return false;
+            std::fprintf(stderr, "glm slots: applied %s; minimum %d = %d lendable + %d kept slots; layout",
+                         path, k_extra + keep, k_extra, keep);
+            for (int il = l0_; il < lt_; ++il)
+                if (F->L[(size_t) il].moe) std::fprintf(stderr, " %d:%d", il, nsl[(size_t) il]);
+            std::fprintf(stderr, "\n");
         }
         size_t tot = 0, xtot = 0;
         int nmin = INT32_MAX, nmax = 0;
