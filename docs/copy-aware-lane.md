@@ -176,3 +176,22 @@ The profile and policy remain opt-in; no deployment promotion was made.
 Run identifier: `codex-copy-profile-cc80982-20261027`.
 Profile SHA-256:
 `654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7`.
+
+### Twelve-thread helper check
+
+The same combined candidate was tested with only the 9600 helper thread count
+changed from six to twelve (same 54 GiB RAM, binary, profile and qshort harness).
+The immediately preceding six-thread run is the reference; it was not rerun in
+randomized order.
+
+| Threads | Chat tok/s, passes 1/2 | Code tok/s, passes 1/2 | Helper CPU % (100% = one logical CPU) |
+|---|---|---|---:|
+| 6 | 34.9 / 34.8 | 29.7 / 30.0 | 455.3 |
+| 12 | 34.3 / 34.8 | 29.6 / 29.7 | 974.3 |
+
+No speed gain was demonstrated. Twelve threads increase process CPU time,
+including worker spinning, without improving this workload. The helper was
+restored to its original manual six-thread/54-GiB invocation, not the inactive
+service launcher that still contains an obsolete 86-GiB value. Copy integrity
+passed 3852/3852 at close; original production recovered afterward.
+Run: `codex-helper12-cc80982-20261027`.
