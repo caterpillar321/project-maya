@@ -432,3 +432,70 @@ The activation controller records the selected server group and request check in
 if startup or the arithmetic smoke check fails. Local copies of the config,
 launcher, experiment supervisors and raw results are retained in the analysis
 directory. The tiny smoke request is a wiring check, not a broad quality eval.
+
+## Primary expert-cache placement experiment
+
+The `codex/cache-layout` branch adds an opt-in, byte-budget-checked per-layer
+slot layout. Runtime source/build: `3bf036a`; tested binary SHA-256
+`0c9d8d796f6165e4d715459b45b468b981c45c47895c0cc4695fbbf3c200314f`.
+`8f506b3` subsequently makes the producer's runtime floor explicit and adds
+documentation; its only runtime-source change is a comment. See
+[expert-slot-layout.md](expert-slot-layout.md) for the format and limitations.
+The C++ parser passed ASan/UBSan tests for byte budgets, capacity bounds,
+protected/unlisted layers and atomic rejection. The Python producer tests and
+full portable CUDA build passed.
+
+Training used the existing code and agent route traces, with chat held out.
+The approximate LRU fit is only a filter: it does not reproduce the actual
+CPU-offload, admission, promotion or helper-ownership policies. A separate
+replay that recomputed helper ownership estimated only 1.6–2.6% fewer misses
+for the conservative candidate. This is not a prediction of token-rate gain.
+
+The first run (`codex-slot-layout-20261027`) completed its baseline but rejected
+the proposed 28-slot donor layers before candidate allocation. The active
+image-enabled configuration requires 34 slots: 15 lendable plus 19 retained.
+Although the image encoder requests about 3.32 GiB, `vision_lend()` frees the
+entire shared tail, whose prefill requirement makes it 7.92 GiB here. The
+guard was retained. The supervisor restored the selected 5200 production
+configuration and verified `/health` after that rejected startup.
+
+The corrected run (`codex-slot-layout-v2-20261027`) keeps layers 3–18 at 34
+slots and redistributes the remaining budget to layers 19–44. The primary
+pool has 1520 total slots in both arms (36–39 versus 34–44 per layer), using
+19.12 versus 19.11 GiB. Both arms use the same new binary, 0.16 ms remote-copy
+cost, demand copy profile, six-thread/54-GiB helper, 262144 context,
+32768 prefill and image support. They run two unchanged qshort passes and
+the existing 16,524-token request twice, then restore the selected launcher.
+
+| Layout | Chat tok/s (two passes) | Code tok/s (two passes) | Mean chat fetches/token | Mean code fetches/token |
+|---|---|---|---:|---:|
+| Default | 36.2 / 36.4 | 31.6 / 31.7 | 35.60 | 49.05 |
+| Conservative redistribution | 36.6 / 36.8 | 31.6 / 32.2 | 34.70 | 48.30 |
+
+The candidate means are +1.1% chat and +0.8% code. This does not establish a
+reliable speed improvement: the code gain occurs in only one pass, and the
+earlier baseline's 36.5/36.7 chat and 31.9/31.5 code overlaps these results.
+The main-engine CPU average was 162.6% versus 163.5% of one core, and the
+Kohane CPU-helper average was 457.3% versus 456.4%: no meaningful CPU relief.
+
+The long request's first prefill was 12.138 s versus 12.129 s; its repeated
+prompt reused 16,523 tokens in both arms (33.2 versus 33.7 ms). Decode was
+30.8/32.5 tok/s on first/repeated default requests versus 30.9/32.3 for the
+candidate. These generated different output lengths, so total request wall
+time is not a fixed-work comparison. No consistent long-context gain emerged.
+
+Remote copy hashes all matched: 3859/3859 default, 3861/3861 candidate. The
+first pass's greedy-answer hash matched across layouts, but the second did
+not, and baseline hashes also varied between passes. These checks verify
+copy integrity and basic functioning, not full output equivalence or a broad
+quality evaluation. Actual image requests were not included in this benchmark;
+the image lending configuration and its minimum-capacity guard were preserved.
+
+**Decision: keep the selected production configuration without a slot profile.**
+The new layout control and fitting tool remain opt-in for further experiments.
+The results do not justify replacing the previously tested production binary.
+The conservative redistribution neither substantially reduces RAM traffic nor
+changes the dominant data path. A more aggressive allocation would require
+changing and separately measuring the prefill/lending geometry, or designing
+helper placement around both data movement and the added remote-call latency.
+Neither was silently changed in this comparison.
