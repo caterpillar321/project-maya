@@ -776,6 +776,14 @@ struct Glm5Model::FastState {
         int64_t n_prof = 0;
         double h_setup = 0, h_enqueue = 0, h_wait = 0, h_after = 0;   // window()'s host phases (the first part's)
         int64_t h_n = 0;
+        // STRATA_GLM_WIN_AUDIT=1: inclusive host timings, independent of WIN_PROF.
+        // The phase-event list is reset on scratch replay; these counters retain
+        // the discarded attempt. No added device work or synchronization.
+        uint64_t audit_windows = 0, audit_rows = 0, audit_attempts = 0;
+        uint64_t audit_replays = 0, audit_group_clashes[2] = {};
+        std::array<uint64_t, kWinMax + 1> audit_by_t{}, audit_replay_by_t{};
+        double audit_wall_ms = 0, audit_setup_ms = 0;
+        double audit_failed_ms = 0, audit_final_ms = 0;
         // STRATA_GLM_WIN_UNION=1: each MoE layer's routed experts per window token (device, layers x kWinMax x 8), and
         // the distinct experts a window's layer routes against its picks (how much computing each expert once would save)
         int* uid = nullptr;

@@ -992,8 +992,16 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         return false;
     }
     static const bool hprof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
+    static const bool audit = [] {
+        const char* v = getenv("STRATA_GLM_WIN_AUDIT");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
     using hclk = std::chrono::steady_clock;
     auto h0 = hclk::now();
+    const auto audit_start = h0;
+    const auto audit_ms = [](hclk::time_point from) {
+        return std::chrono::duration<double, std::milli>(hclk::now() - from).count();
+    };
     const auto hlap = [&](double& acc) {
         if (!hprof) return;
         const auto t = hclk::now();
@@ -1032,9 +1040,11 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     }
     cudaSetDevice(dev_);
     hlap(WH.h_setup);
+    if (audit) WH.audit_setup_ms += audit_ms(audit_start);
     // a batched pass whose tokens took more scratch slots than a layer has runs again token by token (rare: the tiers
     // land a fetched expert in a spare slot first)
     for (int attempt = 0;; ++attempt) {
+    const auto attempt_start = audit ? hclk::now() : hclk::time_point{};
     // the embedded rows (host-dequantized from the shard mapping) -> the 4 streams of each token
     {
         FastState* F = fast_;
@@ -1105,6 +1115,21 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
             cudaMemcpyAsync(Wm.scr_h, Wm.scr + 1, 3 * sizeof(unsigned int), cudaMemcpyDeviceToHost, m->fast_->cs);
         cudaStreamSynchronize(m->fast_->cs);
         if (Wm.scr_h != nullptr && ((Wm.scr_h[0] | Wm.scr_h[2]) & 0x80000000u) != 0u) clash = true;
+        if (audit && Wm.scr_h != nullptr) {
+            WH.audit_group_clashes[0] += (Wm.scr_h[0] & 0x80000000u) != 0u;
+            WH.audit_group_clashes[1] += (Wm.scr_h[2] & 0x80000000u) != 0u;
+        }
+    }
+    if (audit) {
+        ++WH.audit_attempts;
+        const double elapsed = audit_ms(attempt_start);
+        if (clash && attempt == 0) {
+            ++WH.audit_replays;
+            ++WH.audit_replay_by_t[(size_t) T];
+            WH.audit_failed_ms += elapsed;
+        } else {
+            WH.audit_final_ms += elapsed;
+        }
     }
     if (clash && attempt == 0) {
         static bool told = false;
@@ -1169,6 +1194,12 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     cudaSetDevice(dev_);
     hlap(WH.h_after);
     if (hprof) ++WH.h_n;
+    if (audit) {
+        ++WH.audit_windows;
+        WH.audit_rows += (uint64_t) T;
+        ++WH.audit_by_t[(size_t) T];
+        WH.audit_wall_ms += audit_ms(audit_start);
+    }
     return true;
 }
 
@@ -1711,6 +1742,30 @@ bool Glm5Model::window_pipe(const int32_t* tokens, int T, int32_t* out, std::str
 }
 
 void Glm5Model::win_prof_report() {
+    if (fast_ != nullptr && fast_->win.audit_windows > 0) {
+        auto& W = fast_->win;
+        const double n = (double) W.audit_windows;
+        const double other = W.audit_wall_ms - W.audit_setup_ms - W.audit_failed_ms - W.audit_final_ms;
+        std::fprintf(stderr,
+                     "glm window audit: %llu windows, %llu rows, %llu attempts, %llu scratch replays "
+                     "(%.2f%%), group clashes %llu/%llu | inclusive host ms/window %.3f: setup %.3f, "
+                     "discarded attempts %.3f, final attempt %.3f, other %.3f | by T windows/replays",
+                     (unsigned long long) W.audit_windows, (unsigned long long) W.audit_rows,
+                     (unsigned long long) W.audit_attempts, (unsigned long long) W.audit_replays,
+                     100.0 * W.audit_replays / n, (unsigned long long) W.audit_group_clashes[0],
+                     (unsigned long long) W.audit_group_clashes[1], W.audit_wall_ms / n,
+                     W.audit_setup_ms / n, W.audit_failed_ms / n, W.audit_final_ms / n, other / n);
+        for (size_t t = 1; t < W.audit_by_t.size(); ++t)
+            if (W.audit_by_t[t] != 0)
+                std::fprintf(stderr, " %zu:%llu/%llu", t, (unsigned long long) W.audit_by_t[t],
+                             (unsigned long long) W.audit_replay_by_t[t]);
+        std::fprintf(stderr, "\n");
+        W.audit_windows = W.audit_rows = W.audit_attempts = W.audit_replays = 0;
+        W.audit_group_clashes[0] = W.audit_group_clashes[1] = 0;
+        W.audit_by_t.fill(0);
+        W.audit_replay_by_t.fill(0);
+        W.audit_wall_ms = W.audit_setup_ms = W.audit_failed_ms = W.audit_final_ms = 0;
+    }
     if (fast_ != nullptr && fast_->win.h_n > 0) {
         auto& W = fast_->win;
         const double n = (double) W.h_n;
