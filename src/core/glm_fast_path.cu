@@ -1686,6 +1686,84 @@ bool Glm5Model::fast_setup(std::string& err) {
             cls_cap[c] = std::max<int64_t>(1, (int64_t) (cls_weight[c] / (double) cls_stride[c])) + 16;
             cls_n[c] = std::min<int64_t>(n, cls_cap[c]);
         }
+        // Opt-in startup rebalancing only: retain the existing class/slot addressing and never pin more bytes.
+        // Parse and validate the complete plan before replacing any class count.
+        if (const char* csv = getenv("STRATA_GLM_RAM_CLASS_SLOTS")) {
+            if (F->ram_resident || F->unified_memory || staging_only || n_parts_ != 1) {
+                err = "glm RAM class override: needs one discrete trunk, RAM_RESIDENT=0 and a non-staging RAM tier";
+                return false;
+            }
+            if (cls_n.empty()) {
+                err = "glm RAM class override: no RAM classes to override";
+                return false;
+            }
+            std::vector<int64_t> requested;
+            requested.reserve(cls_n.size());
+            const char* at = csv;
+            for (size_t c = 0; c < cls_n.size(); ++c) {
+                while (std::isspace((unsigned char) *at)) ++at;
+                if (!std::isdigit((unsigned char) *at)) {
+                    err = "glm RAM class override: expected one positive decimal slot count per class (class " +
+                          std::to_string(c) + ")";
+                    return false;
+                }
+                int64_t count = 0;
+                while (std::isdigit((unsigned char) *at)) {
+                    const int digit = *at++ - '0';
+                    if (count > cls_cap[c] / 10 ||
+                        (count == cls_cap[c] / 10 && digit > cls_cap[c] % 10)) {
+                        err = "glm RAM class override: slot count exceeds cap " + std::to_string(cls_cap[c]) +
+                              " for class " + std::to_string(c);
+                        return false;
+                    }
+                    count = count * 10 + digit;
+                }
+                const int64_t least = std::min<int64_t>(16, cls_cap[c]);
+                if (count <= 0 || count < least) {
+                    err = "glm RAM class override: slot count is below minimum " + std::to_string(least) +
+                          " for class " + std::to_string(c);
+                    return false;
+                }
+                requested.push_back(count);
+                while (std::isspace((unsigned char) *at)) ++at;
+                if (c + 1 < cls_n.size()) {
+                    if (*at != ',') {
+                        err = "glm RAM class override: expected exactly " + std::to_string(cls_n.size()) +
+                              " comma-separated class counts";
+                        return false;
+                    }
+                    ++at;
+                } else if (*at != '\0') {
+                    err = "glm RAM class override: expected exactly " + std::to_string(cls_n.size()) +
+                          " comma-separated class counts, with no trailing data";
+                    return false;
+                }
+            }
+            uint64_t before = 0, after = 0;
+            for (size_t c = 0; c < cls_n.size(); ++c) {
+                const uint64_t stride = (uint64_t) cls_stride[c];
+                if (cls_n[c] < 0 || stride == 0 ||
+                    (uint64_t) cls_n[c] > (~uint64_t{0} - before) / stride) {
+                    err = "glm RAM class override: invalid original byte budget";
+                    return false;
+                }
+                before += (uint64_t) cls_n[c] * stride;
+            }
+            for (size_t c = 0; c < requested.size(); ++c) {
+                const uint64_t stride = (uint64_t) cls_stride[c];
+                if ((uint64_t) requested[c] > (before - after) / stride) {
+                    err = "glm RAM class override: requested classes exceed the original planned pinned bytes";
+                    return false;
+                }
+                after += (uint64_t) requested[c] * stride;
+            }
+            for (size_t c = 0; c < cls_n.size(); ++c)
+                std::fprintf(stderr, "glm RAM class override class %zu: stride=%zu oldslots=%lld newslots=%lld\n",
+                             c, cls_stride[c], (long long) cls_n[c], (long long) requested[c]);
+            std::fprintf(stderr, "glm RAM class override: planned %.3f -> %.3f MiB (no budget increase)\n",
+                         (double) before / 1048576.0, (double) after / 1048576.0);
+            cls_n.swap(requested);
+        }
         // parallel load: take the planned size from the budget and let the next part plan; every part pins once all
         // have planned (a later part's measurement then sees no tier half pinned)
         if (split_load_ != nullptr) {
