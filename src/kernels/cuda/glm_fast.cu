@@ -6366,7 +6366,22 @@ void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s) {
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
         if (sms <= 0) sms = 80;
     }
-    moe_fetch_kernel<<<sms, 256, 0, s>>>(d, k, (blob_bytes + 15) / 16);
+    // The host-mapped pull can saturate its link before every SM is needed.
+    // Keep the default launch unchanged; allow controlled real-inference A/Bs
+    // without changing the copies, expert selection, or reduction order.
+    static const int blocks_env = [] {
+        const char* v = getenv("STRATA_GLM_FETCH_BLOCKS");
+        if (v == nullptr || *v == '\0') return 0;
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (*end != '\0' || n < 1 || n > 4096) {
+            std::fprintf(stderr, "glm fetch: ignoring invalid STRATA_GLM_FETCH_BLOCKS; expected 1..4096\n");
+            return 0;
+        }
+        std::fprintf(stderr, "glm fetch: host-mapped expert copies use %ld blocks of 256 threads\n", n);
+        return (int) n;
+    }();
+    moe_fetch_kernel<<<blocks_env > 0 ? blocks_env : sms, 256, 0, s>>>(d, k, (blob_bytes + 15) / 16);
     launch_check("moe_fetch");
 }
 
