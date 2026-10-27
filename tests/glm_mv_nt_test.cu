@@ -4,6 +4,7 @@
 //
 //   glm_mv_nt_test           the parity checks (ctest; with STRATA_GLM_MV_GENERIC=1 too: the generic kernel only)
 //   glm_mv_nt_test --bench   the time of one Q6_K 4096 x 12288 GEMV (the dense FFN's gate) for 1..8 activations
+//   glm_mv_nt_test --nc3-check  opt-in NC=3 against the old NC=4 dispatch and single columns, bit for bit
 #include "strata/kernels/glm_fast.hpp"
 
 #include "ggml.h"
@@ -182,6 +183,131 @@ bool run_case(const char* name, const std::vector<Job>& jobs, int nt, cudaStream
     return ok;
 }
 
+// The dispatcher chooses NC from the largest ncol of each type.  Appending a separate four-column job of every
+// type forces the unchanged NC=4 specialization for each original three-column job, including its padding read
+// of column 2.  The dummy writes separate storage; no kernel API or test-only production switch is necessary.
+bool run_nc3_case(const char* name, const std::vector<Job>& jobs, const std::vector<int>& ncols, int input_step,
+                  cudaStream_t s) {
+    constexpr int kGuard = 5;
+    constexpr float kCanary = -12345.25f;
+    const int n = (int) jobs.size();
+    if (n == 0 || 2 * n > gf::kMaxMvJobs || ncols.size() != jobs.size()) return false;
+    std::vector<float*> d3(n), d4(n), d1(n), dummy(n);
+    std::vector<gf::MvJob> cols(n), old(2 * n);
+    std::vector<size_t> sizes(n);
+    for (int i = 0; i < n; ++i) {
+        const Job& j = jobs[i];
+        const int stride = j.w.n_out + 7;
+        sizes[i] = 2 * kGuard + 4 * (size_t) stride;
+        const std::vector<float> init(sizes[i], kCanary);
+        for (float** p : {&d3[i], &d4[i], &d1[i], &dummy[i]}) {
+            check(cudaMalloc(p, init.size() * sizeof(float)), "NC3 output");
+            check(cudaMemcpyAsync(*p, init.data(), init.size() * sizeof(float), cudaMemcpyHostToDevice, s),
+                  "NC3 output guard");
+        }
+        // Keep init alive until all four host-to-device copies have completed.
+        check(cudaStreamSynchronize(s), "NC3 output guard");
+        cols[i] = mv_job(j, 0, d3[i] + kGuard);
+        cols[i].ncol = ncols[i];
+        cols[i].xq_cstride = (int64_t) input_step * (j.w.n_in / 32) * kQ8;
+        cols[i].xf_cstride = (int64_t) input_step * j.w.n_in;
+        cols[i].y_cstride = stride;
+        old[i] = cols[i];
+        old[i].y = d4[i] + kGuard;
+        old[n + i] = cols[i];
+        old[n + i].ncol = 4;
+        old[n + i].y = dummy[i] + kGuard;
+    }
+    bool ok = gf::mv(cols.data(), n, s);
+    ok = gf::mv(old.data(), 2 * n, s) && ok;
+    for (int i = 0; i < n; ++i)
+        for (int c = 0; c < ncols[i]; ++c) {
+            const gf::MvJob one = mv_job(jobs[i], c * input_step,
+                                        d1[i] + kGuard + (size_t) c * cols[i].y_cstride);
+            ok = gf::mv(&one, 1, s) && ok;
+        }
+    check(cudaStreamSynchronize(s), name);
+    check(cudaGetLastError(), name);
+    ok = gf::launch_errors() == 0 && ok;
+    for (int i = 0; i < n; ++i) {
+        std::vector<float> a(sizes[i]), b(sizes[i]), ref(sizes[i]);
+        check(cudaMemcpy(a.data(), d3[i], a.size() * sizeof(float), cudaMemcpyDeviceToHost), "NC3 read");
+        check(cudaMemcpy(b.data(), d4[i], b.size() * sizeof(float), cudaMemcpyDeviceToHost), "NC4 read");
+        check(cudaMemcpy(ref.data(), d1[i], ref.size() * sizeof(float), cudaMemcpyDeviceToHost), "NC1 read");
+        size_t bad = 0;
+        for (size_t k = 0; k < a.size(); ++k) {
+            const size_t offset = k >= kGuard ? k - kGuard : sizes[i];
+            const bool active = offset / cols[i].y_cstride < (size_t) ncols[i] &&
+                                offset % cols[i].y_cstride < (size_t) jobs[i].w.n_out;
+            const bool differs = std::memcmp(&a[k], &b[k], sizeof(float)) != 0 ||
+                                 std::memcmp(&a[k], &ref[k], sizeof(float)) != 0;
+            const bool invalid = active ? !std::isfinite(ref[k]) : ref[k] != kCanary;
+            if (differs || invalid) {
+                if (bad++ == 0)
+                    std::fprintf(stderr, "%s: job %d type %d offset %zu (%s): NC3 %.9g, NC4 %.9g, one %.9g\n",
+                                 name, i, jobs[i].w.type, k, active ? "output" : "guard", a[k], b[k], ref[k]);
+            }
+        }
+        if (bad != 0) ok = false;
+        for (float* p : {d3[i], d4[i], d1[i], dummy[i]}) check(cudaFree(p), "NC3 output free");
+    }
+    if (!ok) std::fprintf(stderr, "%s: NC3 parity FAILED\n", name);
+    return ok;
+}
+
+int check_nc3(cudaStream_t s) {
+    // Set these before the first mv() call: its dispatch options are cached.  This check must exercise dp4a.
+#if defined(_WIN32)
+    _putenv_s("STRATA_GLM_MV_NC3", "1");
+    _putenv_s("STRATA_GLM_MV_TILED", "1");
+    _putenv_s("STRATA_GLM_MV_MMA", "0");
+    _putenv_s("STRATA_GLM_MV_GENERIC", "");
+#else
+    setenv("STRATA_GLM_MV_NC3", "1", 1);
+    setenv("STRATA_GLM_MV_TILED", "1", 1);
+    setenv("STRATA_GLM_MV_MMA", "0", 1);
+    unsetenv("STRATA_GLM_MV_GENERIC");
+#endif
+    std::mt19937 rng(731);
+    int failed = 0, cases = 0;
+    for (const auto& shape : {std::pair<int, int>{256, 1}, {512, 31}, {1536, 32}, {1536, 33}, {4096, 300},
+                              {12288, 129}}) {
+        const Acts x = make_acts(shape.first, rng, s);
+        std::vector<Job> jobs;
+        float* bias = nullptr;
+        std::vector<float> hb(shape.second);
+        for (size_t i = 0; i < hb.size(); ++i) hb[i] = 0.01f * (float) i - 1.0f;
+        check(cudaMalloc(&bias, hb.size() * sizeof(float)), "NC3 bias");
+        check(cudaMemcpy(bias, hb.data(), hb.size() * sizeof(float), cudaMemcpyHostToDevice), "NC3 bias");
+        for (const int type : {8, 12, 14}) {
+            Job j{make_weights(type, shape.first, shape.second, rng), x};
+            const std::string name = "NC3 type " + std::to_string(type) + " " + std::to_string(shape.first) + "x" +
+                                     std::to_string(shape.second);
+            ++cases;
+            if (!run_nc3_case(name.c_str(), {j}, {3}, 1, s)) ++failed;
+            j.alpha = -0.125f;
+            j.bias = bias;
+            ++cases;
+            if (!run_nc3_case((name + " strided, scaled, biased").c_str(), {j}, {3}, 2, s)) ++failed;
+            jobs.push_back(j);
+        }
+        // Same-type mixed column counts also share NC=3; mixed types are separate dispatches in one mv().
+        for (const Job& j : jobs) {
+            ++cases;
+            if (!run_nc3_case("NC3 same type, 2 and 3 columns", {j, j}, {2, 3}, 2, s)) ++failed;
+        }
+        ++cases;
+        if (!run_nc3_case("NC3 mixed types", jobs, {3, 3, 3}, 2, s)) ++failed;
+        for (const Job& j : jobs) check(cudaFree(j.w.d), "NC3 weights free");
+        check(cudaFree(x.xf), "NC3 activations free");
+        check(cudaFree(x.xq), "NC3 activations free");
+        check(cudaFree(bias), "NC3 bias free");
+    }
+    std::printf("glm_mv_nt_test NC3: %d cases, %d failed (NC4 + single-column bitwise parity and output guards)\n",
+                cases, failed);
+    return failed != 0;
+}
+
 int bench(cudaStream_t s) {
     std::mt19937 rng(7);
     const Weights w = make_weights(14, 4096, 12288, rng);
@@ -222,6 +348,7 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     check(cudaStreamCreate(&s), "stream");
     if (argc > 1 && std::strcmp(argv[1], "--bench") == 0) return bench(s);
+    if (argc > 1 && std::strcmp(argv[1], "--nc3-check") == 0) return check_nc3(s);
     std::mt19937 rng(1234);
     // every type mv() serves: F32, BF16 (the pack's small and big float rows), the K-quants and Q8_0 (typed kernels),
     // the rest (the generic kernel).  Two row counts: a tail of 4 rows past the last full block of 8, and one block.

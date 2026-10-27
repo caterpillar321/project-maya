@@ -1809,7 +1809,14 @@ __global__ void __launch_bounds__(256) mvc_kernel_t(const STRATA_GRID_CONSTANT M
 
 template<int T>
 void mvc_launch(const MvBatch& b, int blocks, int nc, cudaStream_t s) {
+    // A three-token verify window otherwise computes its last column twice in NC=4.  NC=3 retains the same
+    // per-column dot/reduction order and four rows per warp; opt in until device parity and timing are checked.
+    static const bool nc3 = [] {
+        const char* v = getenv("STRATA_GLM_MV_NC3");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
     if (nc <= 2) mvc_kernel_t<T, 2><<<blocks, 256, 0, s>>>(b);
+    else if (nc == 3 && nc3) mvc_kernel_t<T, 3><<<blocks, 256, 0, s>>>(b);
     else if (nc <= 4) mvc_kernel_t<T, 4><<<blocks, 256, 0, s>>>(b);
     else if (nc <= 8) mvc_kernel_t<T, 8><<<blocks, 256, 0, s>>>(b);
     else mvc_kernel_t<T, 16><<<blocks, 256, 0, s>>>(b);
