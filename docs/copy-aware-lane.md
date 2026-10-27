@@ -105,3 +105,34 @@ The experimental switch remains off; this candidate is not promoted.
 Run identifier: `codex-copy-lane-74bad15-20261027`.
 Unmodified qshort harness SHA-256:
 `278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64`.
+
+## Demand-ranked remote copies (experimental)
+
+`MAYA_GLM_NET_COPY_PROFILE=/absolute/path/to/profile.txt` changes only the
+selection of RAM copies placed on the existing CPU helper. Primary VRAM/RAM
+placement, GPU helper ownership, routing counts, model weights, RAM budgets and
+thread counts are unchanged. With no profile the legacy placement remains.
+
+Generate the placement profile from existing route logs:
+
+```sh
+python3 tools/make_net_copy_profile.py code.0 agent.0 --out copy-demand.txt
+```
+
+Each trace is normalized by its route count and given equal weight. By default a
+CPU-mask event has weight 1 and a PCIe-fetch event 0.25; the latter is a heuristic
+for experts the CPU could help compute. These masks include permanently owned
+helpers too: the engine filters those and primary-resident experts out using
+its actual startup tables. This is an off-GPU demand profile, not a measurement
+of local-only fallback for each expert.
+
+The text format is `layer expert nonnegative_score`, with optional `#` comments.
+Invalid, empty or duplicate-key profiles fail setup. Copy candidates are sorted
+by score per byte, with the legacy ordering breaking ties, and packed into the
+same available helper RAM. The score is not an estimate of achieved speed.
+
+Test legacy copies, demand-ranked copies, and demand-ranked copies plus
+`MAYA_GLM_COPY_AWARE=1` separately. Keep the existing speed harness unchanged;
+capture local/remote CPU time and end-to-end throughput, since more remote work
+can also increase reply waits. A separately trained profile is needed to avoid
+selecting the copies from the evaluation questions themselves.

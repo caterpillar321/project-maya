@@ -17,6 +17,7 @@
 // resident experts are excluded, and every other layer's slots are untouched.
 #include "glm_fast_state.hpp"
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/net_copy_profile.hpp"
 #include "strata/core/glm_model.hpp"
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/kernels/copy_lane_policy.hpp"
@@ -2141,13 +2142,36 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
                 }
             }
             std::stable_sort(keys.begin(), keys.end(), [&](int a, int b) { return F->usage[(size_t) a] < F->usage[(size_t) b]; });
+            // A separate placement profile: prioritize observed CPU-lane demand
+            // per byte without changing the primary cache, helpers or LFU counts.
+            std::vector<double> copy_scores;
+            double candidate_score = 0.0, selected_score = 0.0;
+            const char* cpp = getenv("STRATA_GLM_NET_COPY_PROFILE");
+            const bool copy_profile = cpp != nullptr && cpp[0] != '\0';
+            if (copy_profile) {
+                std::ifstream input(cpp);
+                if (!input || !read_net_copy_profile(input, g_.n_layers + 1, g_.n_expert, copy_scores, err)) {
+                    err = "GLM net copy profile " + std::string(cpp) + ": " + (err.empty() ? "cannot open" : err);
+                    return false;
+                }
+                const auto stride = [&](int key) {
+                    return (double) F->rc[(size_t) F->layer_rc[(size_t) (key / g_.n_expert)]].stride;
+                };
+                for (int key : keys) candidate_score += copy_scores[(size_t) key];
+                std::stable_sort(keys.begin(), keys.end(), [&](int a, int b) {
+                    return copy_scores[(size_t) a] / stride(a) > copy_scores[(size_t) b] / stride(b);
+                });
+            }
             F->copy_of.assign((size_t) F->n_keys, 0);
             F->copy_refs.clear();
             double bytes = 0.0;
             for (int key : keys) {
                 const int il = key / g_.n_expert, e = key % g_.n_expert;
                 const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
-                if (bytes + (double) R.stride > budget || R.stride > h.ram_available()) break;
+                if (bytes + (double) R.stride > budget || R.stride > h.ram_available()) {
+                    if (copy_profile) continue;
+                    break;
+                }
                 const auto& Ly = F->L[(size_t) il];
                 const auto& nl = pack_layers_[(size_t) il];
                 const uint32_t sh[3] = {(uint32_t) nl.gate_shard, (uint32_t) nl.up_shard, (uint32_t) nl.down_shard};
@@ -2162,8 +2186,12 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
                 for (int j = 0; j < 3; ++j) r.dst[j] = dst[j], r.len[j] = len[j];
                 F->copy_refs.push_back(r);
                 bytes += (double) R.stride;
+                if (copy_profile) selected_score += copy_scores[(size_t) key];
             }
             if (!h.flush(err)) return false;
+            if (copy_profile)
+                std::fprintf(stderr, "glm net copy profile: %s, selected %.2f%% of eligible demand score in %.2f GB\n",
+                             cpp, candidate_score > 0 ? 100.0 * selected_score / candidate_score : 0.0, bytes / 1e9);
             const double t_load = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             // the check: every copy's hash there against this trunk's RAM-tier blob (sekai-pc's 128 GB ran unstable at
             // one SoC voltage, 10-26: a flipped bit there would be a silently wrong expert)
