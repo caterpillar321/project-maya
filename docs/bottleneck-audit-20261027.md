@@ -262,3 +262,47 @@ Raw logs and per-pass CPU statistics are saved under
 `/home/caterpillar/Agent/maya-analysis-20261027/runs/codex-ram5200-cc80982-20261027/`.
 The accessible kernel journal showed no matching hardware-memory error reports
 during the stress test or inference benchmark.
+
+
+## Small follow-up: remote cost 0.28 → 0.20 ms at DDR5-5200
+
+Run `codex-copycost-5200-20261027` compares the same cc80982 demand-profile plus
+copy-aware candidate at six helper threads / 54 GiB. The only routing parameter
+changed is `MAYA_GLM_NET_COPY_MS`: 0.28 versus 0.20. Both arms explicitly use
+`MAYA_GLM_NET_COPY_RTT=0.35` and `MAYA_GLM_NET_COPY_RTT_SHARED=0.10`; neither uses
+a manual plan override. The 0.20 value is a trial scheduling parameter, **not a
+measured isolated CPU expert time**. No new engine build was required.
+
+Each arm runs two unchanged Claude qshort chat/code passes (3440 output tokens,
+including the greedy probes). The baseline and candidate each start fresh. The
+logged generic plan for 0..8 misses changes from `0 0 0 1 1 2 2 3 3` to
+`0 0 0 1 2 2 3 3 4`; copy-aware routing further accounts for available copies and
+mandatory helper work.
+
+| Quantity | 0.28 ms baseline | 0.20 ms candidate |
+|---|---:|---:|
+| Chat tok/s, both passes | 34.9 / 35.0 | 35.7 / 35.6 |
+| Code tok/s, both passes | 30.2 / 30.4 | 31.6 / 31.3 |
+| Mean chat tok/s | 34.95 | 35.65 (+2.0%) |
+| Mean code tok/s | 30.30 | 31.45 (+3.8%) |
+| Chat RAM fetches/token | 44.00 | 40.45 (-8.1%) |
+| Code RAM fetches/token | 60.55 | 52.90 (-12.6%) |
+| Optional experts sent to remote RAM copies | 56,589 | 70,006 (+23.7%) |
+| Main engine CPU, percent of one logical core | 173.00 | 169.88 |
+| Remote helper CPU, percent of one logical core | 450.42 | 451.90 |
+| Service-thread net-answer time, ms/route | 0.364 | 0.393 |
+
+More remote work increased recorded side-answer latency while reducing main
+RAM fetches enough to improve the measured end-to-end speed. These service
+counters overlap GPU work and do not measure the exposed layer-join stall.
+Optional main-CPU expert computation stayed at zero in both arms. All remote
+copies matched their hashes at shutdown: 3851/3851 and 3863/3863 respectively.
+
+Both candidate passes were faster than both baseline passes. This is still a
+small sequential A/B run, not a broad accuracy or performance qualification:
+generated text/greedy hashes and startup cache capacities differed. Copy hashes
+check weight integrity, not equivalence of model outputs. No claim is made that
+0.20 is the calibrated optimum. The original production binary/configuration is
+restored after testing; the experimental configuration is retained in
+`/home/caterpillar/Agent/maya-analysis-20261027/runs/codex-copycost-5200-20261027/cost020.json`.
+Raw logs, helper session summaries, and `comparison.json` are in the same folder.
