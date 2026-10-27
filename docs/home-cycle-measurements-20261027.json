@@ -1,0 +1,1476 @@
+{
+  "date": "2026-10-27",
+  "timezone": "Asia/Seoul",
+  "metric": "single-request emitted tokens/s",
+  "runs": [
+    {
+      "phase": "complete",
+      "restored": true,
+      "error": null,
+      "binary_sha256": "0c9d8d796f6165e4d715459b45b468b981c45c47895c0cc4695fbbf3c200314f",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+      "results": [
+        {
+          "label": "plain",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.3,
+              "ram_fetches_per_tok": 35.6,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.7,
+              "ram_fetches_per_tok": 49.1,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.6784891430312,
+            "remote_helper_pct_one_core": 456.64342038499325,
+            "harness_wall_seconds": 59.98334537899791
+          }
+        },
+        {
+          "label": "plain",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.5,
+              "ram_fetches_per_tok": 35.1,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.7,
+              "ram_fetches_per_tok": 48.8,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.44794241452664,
+            "remote_helper_pct_one_core": 456.4419501320078,
+            "harness_wall_seconds": 59.83455287600373
+          }
+        },
+        {
+          "label": "plain-profile",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 33.6,
+              "ram_fetches_per_tok": 35.6,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 29.8,
+              "ram_fetches_per_tok": 48.4,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 165.1212727093943,
+            "remote_helper_pct_one_core": 459.4069442636714,
+            "harness_wall_seconds": 63.49272766599461
+          }
+        },
+        {
+          "label": "mtp-loaded-fixed0",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 35.4,
+              "ram_fetches_per_tok": 36.4,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.0,
+              "ram_fetches_per_tok": 50.4,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 161.73389990184694,
+            "remote_helper_pct_one_core": 459.2064261404,
+            "harness_wall_seconds": 61.434244806005154
+          }
+        },
+        {
+          "label": "mtp-fixed1",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 38.0,
+              "ram_fetches_per_tok": 40.7,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 32.1,
+              "ram_fetches_per_tok": 58.6,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 174.8330276027291,
+            "remote_helper_pct_one_core": 460.8011517347724,
+            "harness_wall_seconds": 58.73032195799897
+          }
+        },
+        {
+          "label": "mtp-fixed1",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 38.1,
+              "ram_fetches_per_tok": 41.1,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 33.4,
+              "ram_fetches_per_tok": 56.0,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 175.22599460952526,
+            "remote_helper_pct_one_core": 460.0288616883949,
+            "harness_wall_seconds": 57.731160393996106
+          }
+        },
+        {
+          "label": "kda-graph",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.2,
+              "ram_fetches_per_tok": 35.5,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.5,
+              "ram_fetches_per_tok": 49.6,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.8866453307423,
+            "remote_helper_pct_one_core": 457.2166278745856,
+            "harness_wall_seconds": 60.13998250199802
+          }
+        },
+        {
+          "label": "kda-graph",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.4,
+              "ram_fetches_per_tok": 35.3,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.4,
+              "ram_fetches_per_tok": 49.6,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.83571491204714,
+            "remote_helper_pct_one_core": 457.9837833516241,
+            "harness_wall_seconds": 59.98684014299943
+          }
+        }
+      ],
+      "name": "codex-cycle-20261027",
+      "configurations": [
+        {
+          "label": "kda-graph",
+          "binary": "maya-slot-layout-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_KDA_GRAPH": "1"
+          }
+        },
+        {
+          "label": "mtp-fixed1",
+          "binary": "maya-slot-layout-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_MTP_FIXED": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_SPEC_PROF": "1"
+          }
+        },
+        {
+          "label": "mtp-loaded-fixed0",
+          "binary": "maya-slot-layout-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_MTP_FIXED": "0",
+            "MAYA_GLM_WIN_STAGGER": "0"
+          }
+        },
+        {
+          "label": "plain-profile",
+          "binary": "maya-slot-layout-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_PROF": "4",
+            "MAYA_GLM_NET_TRACE": "1",
+            "MAYA_GLM_ROUTE_LOG": "/home/caterpillar/fn/codex-cycle-20261027/plain-routes"
+          }
+        },
+        {
+          "label": "plain",
+          "binary": "maya-slot-layout-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt"
+          }
+        }
+      ],
+      "contexts": {
+        "mtp-fixed1-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19509.82569599728,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12773.9,
+              "prompt_per_token_ms": 0.773,
+              "prompt_per_second": 1293.6,
+              "predicted_n": 219,
+              "predicted_ms": 6719.7,
+              "predicted_per_token_ms": 30.684,
+              "predicted_per_second": 32.6,
+              "draft_n": 114,
+              "draft_n_accepted": 104
+            },
+            "outside_native_ms": 16.225695997279217,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6671.531995998521,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 36.8,
+              "prompt_per_token_ms": 36.8,
+              "prompt_per_second": 27.2,
+              "predicted_n": 225,
+              "predicted_ms": 6582.4,
+              "predicted_per_token_ms": 29.255,
+              "predicted_per_second": 34.2,
+              "draft_n": 119,
+              "draft_n_accepted": 105
+            },
+            "outside_native_ms": 52.33199599852105,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "plain-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19427.92845200165,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12174.7,
+              "prompt_per_token_ms": 0.737,
+              "prompt_per_second": 1357.2,
+              "predicted_n": 224,
+              "predicted_ms": 7236.0,
+              "predicted_per_token_ms": 32.304,
+              "predicted_per_second": 31.0,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 17.22845200165102,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 7048.315072999685,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 32.7,
+              "prompt_per_token_ms": 32.7,
+              "prompt_per_second": 30.6,
+              "predicted_n": 225,
+              "predicted_ms": 6964.4,
+              "predicted_per_token_ms": 30.953,
+              "predicted_per_second": 32.3,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 51.21507299968562,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ]
+      },
+      "window_audits": {},
+      "files": {
+        "kda-graph-engine.log": "4eccacd4e4b8dcc1fe271baf8449dc1a6127726ced7aa1dc42522630d06f7f2e",
+        "kda-graph-pass1.txt": "f9acf4577cea1d877627ace1597a15996ca77ca5ae92bf9bcfa30f45e31bb305",
+        "kda-graph-pass2.txt": "3641997bc011cec6a56b2182997bb2b3154e49b334e57e6cfb2f72bbe7b132f0",
+        "kda-graph-server.log": "8b444fa1d777b73eb8e910dae4f63ef7e105ae6279bbc0e498dc45abd3c51de0",
+        "kda-graph.json": "a7a3ea0a2170f6ce991bc7a8d6301d1225d594f9c2d3450fa1c4a1b1345be7c4",
+        "mtp-fixed1-context.jsonl": "bb92f84c67907605dcb367f99a575a3b7de8476edeb4e860e256ccb84bb0299b",
+        "mtp-fixed1-context.txt": "bb92f84c67907605dcb367f99a575a3b7de8476edeb4e860e256ccb84bb0299b",
+        "mtp-fixed1-engine.log": "c265162074b93538cee04c47463cb6f4fe91a0088c0d78dfb8167bce2f29ed9d",
+        "mtp-fixed1-pass1.txt": "b9c4cec5880fc84e2ca4b82aa776345f35cd89f7acb9ce7481d61ec90153b99e",
+        "mtp-fixed1-pass2.txt": "fe383278fd882b832f3199bd9f36bfc2db89300cccffdd52deb346e2b6d90069",
+        "mtp-fixed1-server.log": "1f65c24837345f680dc0aa820fdf781983892ef383172b064c6f8d0905358a18",
+        "mtp-fixed1.json": "3d0f8bf56d532e44921c33ab9ea6c2d09ee955b754302ae877674809a5b6aa5a",
+        "mtp-loaded-fixed0-engine.log": "790b0ef0700456f7c952a37e3b678caf29cd05b1aeb6c53b8bffe4d8a10c65f6",
+        "mtp-loaded-fixed0-pass1.txt": "7a6c92e4ee4662703a90dbccfcee96f4f5709d0cca9623dc4303721d0220afaa",
+        "mtp-loaded-fixed0-server.log": "1d2d61df76b844285cc6b7b9e3679bb74bf2536b46bdbe54b685856e3ce1aa9b",
+        "mtp-loaded-fixed0.json": "9725b446265c9d554505d8edea52f56dcbdd287a64a6d5588235dc26f33a07f2",
+        "network-monitor.jsonl": "1bbdb2c3f974b92c0cb90a9e639b11045e2d584dc219337565a2e5a70b82bd0f",
+        "original-config.json": "0a9bba642ec0b10ca5e75abb72c840f66907e73512beea6a753afb4f614127d5",
+        "pcie-dmon.txt": "240034ef608ace9aac86a4f7ddd1a66348637f9bfb0353927d81f8eed8df5de6",
+        "plain-context.jsonl": "ec0431f56a2aa99861b45ecb488b194b6c2d96b68120cf8f4c028207cf31cfb7",
+        "plain-context.txt": "ec0431f56a2aa99861b45ecb488b194b6c2d96b68120cf8f4c028207cf31cfb7",
+        "plain-engine.log": "11f49258ad7b4dade5ba043928a88fb090af26dc5cd9c551014e3cf426c3a25c",
+        "plain-pass1.txt": "61e780a70eb66ee705821aa05d488b66fb8d04280c66b93eb1014f66e4e3defe",
+        "plain-pass2.txt": "8d4745aa025e93d434fed1438e0e6592c8f2bd131fc022d8b9bb725523ea22aa",
+        "plain-profile-engine.log": "e6d3190c44194850242a19e67957c25f972a6f5d6749acd7ee8e9aaafb895c70",
+        "plain-profile-pass1.txt": "06dd3d53831d37f05a60833df184aa76aab03d665470fe8b0770356e74d08028",
+        "plain-profile-server.log": "e275eed6a673a9393d02d7a14cc6e409ff0071407671c64bb1de37ee2d5a23e9",
+        "plain-profile.json": "43c6996248cfca2f8b97f9c2fda7d9fef463b2dfc11e49bfe1ecd5966a761825",
+        "plain-routes.0": "f6c937782f50a0f349887cfafe771d3c685fcc0295222ceb852c95aa8332790a",
+        "plain-server.log": "02f365b6984f15194e6a9c54647ed1c9384098990504180025bb26bc409e5d0a",
+        "plain.json": "843685f2d182f6f9c3bf5c798a215620e5e92acfb53a341c0efeb7ad35014ab1",
+        "status.json": "8531e0c7b56e9d6fe3cecc4f62d8acd945dca18f062aa1d5b3e184d9f10ab496",
+        "vision-memory.json": "e510b185aace964aa266211b5c6a2e8901fe8e3f1cc133771e203ac18aa8c46c"
+      }
+    },
+    {
+      "phase": "complete",
+      "restored": true,
+      "error": null,
+      "binary_sha256": "14eb717772caa6fa079f956e8622a9307610739d421ca183126a3efb10628955",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+      "results": [
+        {
+          "label": "fixed1-audit",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 38.0,
+              "ram_fetches_per_tok": 41.1,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 33.4,
+              "ram_fetches_per_tok": 55.1,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 175.62242686099222,
+            "remote_helper_pct_one_core": 459.14846344589836,
+            "harness_wall_seconds": 57.783053004000976
+          }
+        },
+        {
+          "label": "fixed1-stages",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.9,
+              "ram_fetches_per_tok": 40.9,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 32.4,
+              "ram_fetches_per_tok": 55.8,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 175.57076134364397,
+            "remote_helper_pct_one_core": 459.691166297395,
+            "harness_wall_seconds": 59.429029755003285
+          }
+        },
+        {
+          "label": "fixed2-audit",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 28.2,
+              "ram_fetches_per_tok": 62.5,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 22.1,
+              "ram_fetches_per_tok": 92.4,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 170.48333155594673,
+            "remote_helper_pct_one_core": 475.0189626905681,
+            "harness_wall_seconds": 77.70847671200318
+          }
+        }
+      ],
+      "name": "codex-window-audit-20261027",
+      "configurations": [
+        {
+          "label": "fixed1-audit",
+          "binary": "maya-window-scratch-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_WIN_AUDIT": "1",
+            "MAYA_GLM_SPEC_PROF": "1",
+            "MAYA_GLM_MTP_FIXED": "1"
+          }
+        },
+        {
+          "label": "fixed1-stages",
+          "binary": "maya-window-scratch-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_WIN_AUDIT": "1",
+            "MAYA_GLM_SPEC_PROF": "1",
+            "MAYA_GLM_MTP_FIXED": "1",
+            "MAYA_GLM_WIN_PROF": "1"
+          }
+        },
+        {
+          "label": "fixed2-audit",
+          "binary": "maya-window-scratch-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_WIN_AUDIT": "1",
+            "MAYA_GLM_SPEC_PROF": "1",
+            "MAYA_GLM_MTP_FIXED": "2"
+          }
+        }
+      ],
+      "contexts": {},
+      "window_audits": {
+        "fixed1-audit-engine": [
+          "glm window audit: 108 windows, 216 rows, 109 attempts, 1 scratch replays (0.93%), group clashes 1/0 | inclusive host ms/window 46.219: setup 0.420, discarded attempts 0.666, final attempt 45.132, other 0.001 | by T windows/replays 2:108/1",
+          "glm window audit: 105 windows, 210 rows, 105 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 46.177: setup 0.440, discarded attempts 0.000, final attempt 45.737, other 0.000 | by T windows/replays 2:105/0",
+          "glm window audit: 103 windows, 206 rows, 103 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 54.903: setup 0.481, discarded attempts 0.000, final attempt 54.421, other 0.000 | by T windows/replays 2:103/0",
+          "glm window audit: 117 windows, 234 rows, 117 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 42.927: setup 0.443, discarded attempts 0.000, final attempt 42.484, other 0.000 | by T windows/replays 2:117/0",
+          "glm window audit: 112 windows, 224 rows, 113 attempts, 1 scratch replays (0.89%), group clashes 1/0 | inclusive host ms/window 55.747: setup 0.465, discarded attempts 0.617, final attempt 54.664, other 0.001 | by T windows/replays 2:112/1",
+          "glm window audit: 105 windows, 210 rows, 106 attempts, 1 scratch replays (0.95%), group clashes 1/0 | inclusive host ms/window 52.057: setup 0.473, discarded attempts 0.577, final attempt 51.006, other 0.001 | by T windows/replays 2:105/1",
+          "glm window audit: 102 windows, 204 rows, 105 attempts, 3 scratch replays (2.94%), group clashes 3/0 | inclusive host ms/window 59.808: setup 0.497, discarded attempts 1.916, final attempt 57.394, other 0.002 | by T windows/replays 2:102/3",
+          "glm window audit: 103 windows, 206 rows, 105 attempts, 2 scratch replays (1.94%), group clashes 2/0 | inclusive host ms/window 54.275: setup 0.459, discarded attempts 1.192, final attempt 52.623, other 0.001 | by T windows/replays 2:103/2",
+          "glm window audit: 61 windows, 122 rows, 61 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 49.092: setup 0.503, discarded attempts 0.000, final attempt 48.589, other 0.000 | by T windows/replays 2:61/0"
+        ],
+        "fixed1-stages-engine": [
+          "glm window audit: 108 windows, 216 rows, 109 attempts, 1 scratch replays (0.93%), group clashes 1/0 | inclusive host ms/window 47.578: setup 0.407, discarded attempts 0.679, final attempt 46.459, other 0.033 | by T windows/replays 2:108/1",
+          "glm window audit: 109 windows, 218 rows, 109 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 47.175: setup 0.422, discarded attempts 0.000, final attempt 46.720, other 0.032 | by T windows/replays 2:109/0",
+          "glm window audit: 101 windows, 202 rows, 101 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 56.518: setup 0.447, discarded attempts 0.000, final attempt 56.038, other 0.032 | by T windows/replays 2:101/0",
+          "glm window audit: 115 windows, 230 rows, 115 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 44.954: setup 0.443, discarded attempts 0.000, final attempt 44.478, other 0.032 | by T windows/replays 2:115/0",
+          "glm window audit: 109 windows, 218 rows, 111 attempts, 2 scratch replays (1.83%), group clashes 2/0 | inclusive host ms/window 58.759: setup 0.491, discarded attempts 1.210, final attempt 57.025, other 0.033 | by T windows/replays 2:109/2",
+          "glm window audit: 107 windows, 214 rows, 107 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 53.634: setup 0.466, discarded attempts 0.000, final attempt 53.135, other 0.033 | by T windows/replays 2:107/0",
+          "glm window audit: 103 windows, 206 rows, 105 attempts, 2 scratch replays (1.94%), group clashes 2/0 | inclusive host ms/window 60.539: setup 0.467, discarded attempts 1.181, final attempt 58.858, other 0.033 | by T windows/replays 2:103/2",
+          "glm window audit: 105 windows, 210 rows, 106 attempts, 1 scratch replays (0.95%), group clashes 1/0 | inclusive host ms/window 54.859: setup 0.466, discarded attempts 0.642, final attempt 53.719, other 0.033 | by T windows/replays 2:105/1",
+          "glm window audit: 61 windows, 122 rows, 62 attempts, 1 scratch replays (1.64%), group clashes 1/0 | inclusive host ms/window 51.996: setup 0.496, discarded attempts 1.025, final attempt 50.442, other 0.034 | by T windows/replays 2:61/1"
+        ],
+        "fixed2-audit-engine": [
+          "glm window audit: 86 windows, 258 rows, 103 attempts, 17 scratch replays (19.77%), group clashes 17/0 | inclusive host ms/window 76.146: setup 0.428, discarded attempts 13.646, final attempt 62.061, other 0.011 | by T windows/replays 3:86/17",
+          "glm window audit: 81 windows, 242 rows, 95 attempts, 14 scratch replays (17.28%), group clashes 14/0 | inclusive host ms/window 74.313: setup 0.443, discarded attempts 11.811, final attempt 62.049, other 0.010 | by T windows/replays 2:1/0 3:80/14",
+          "glm window audit: 72 windows, 215 rows, 110 attempts, 38 scratch replays (52.78%), group clashes 38/0 | inclusive host ms/window 118.287: setup 0.490, discarded attempts 41.110, final attempt 76.657, other 0.029 | by T windows/replays 2:1/0 3:71/38",
+          "glm window audit: 105 windows, 315 rows, 111 attempts, 6 scratch replays (5.71%), group clashes 6/0 | inclusive host ms/window 61.022: setup 0.494, discarded attempts 4.448, final attempt 56.077, other 0.003 | by T windows/replays 3:105/6",
+          "glm window audit: 76 windows, 227 rows, 115 attempts, 39 scratch replays (51.32%), group clashes 39/0 | inclusive host ms/window 124.673: setup 0.561, discarded attempts 43.100, final attempt 80.983, other 0.028 | by T windows/replays 2:1/0 3:75/39",
+          "glm window audit: 81 windows, 243 rows, 96 attempts, 15 scratch replays (18.52%), group clashes 15/0 | inclusive host ms/window 86.186: setup 0.460, discarded attempts 14.643, final attempt 71.074, other 0.010 | by T windows/replays 3:81/15",
+          "glm window audit: 80 windows, 240 rows, 126 attempts, 46 scratch replays (57.50%), group clashes 46/0 | inclusive host ms/window 130.947: setup 0.465, discarded attempts 48.051, final attempt 82.401, other 0.031 | by T windows/replays 3:80/46",
+          "glm window audit: 73 windows, 219 rows, 111 attempts, 38 scratch replays (52.05%), group clashes 38/0 | inclusive host ms/window 115.879: setup 0.558, discarded attempts 41.147, final attempt 74.147, other 0.028 | by T windows/replays 3:73/38",
+          "glm window audit: 46 windows, 137 rows, 50 attempts, 4 scratch replays (8.70%), group clashes 4/0 | inclusive host ms/window 72.834: setup 0.463, discarded attempts 6.445, final attempt 65.921, other 0.005 | by T windows/replays 2:1/0 3:45/4"
+        ]
+      },
+      "files": {
+        "fixed1-audit-engine.log": "ac71d7c1ba9c68be2999e3088379ed6e8272fdbceaa6f84f2a2393dafee1d714",
+        "fixed1-audit-pass1.txt": "8f0049da5d9aaded0ef6f62e381b1b86de93b5100ee5d84da64e58d4052863e8",
+        "fixed1-audit-server.log": "5bb2eaaa99c64f3e101da06311f1b8b575311c999ca043d60f88e2007cecb67f",
+        "fixed1-audit.json": "22ae1bb49882e256885097fe87243eefe69f9347f913ecd0bbc93e5f3fb5c363",
+        "fixed1-stages-engine.log": "731b282aba5d48e226ff3bee34583d212c8bde3aabab58e27368629b124bcad9",
+        "fixed1-stages-pass1.txt": "4c125d6620030bedf5087b698c3af386f8aa7515d14a8d7ce4c79026a90d287a",
+        "fixed1-stages-server.log": "65fa70812fd4b1f0491aef6b1c6f3b04844295bcb6ff9c7c24fd2eb036a6a338",
+        "fixed1-stages.json": "089137d8a3f04689b1efb330556b996b3c2042a164f8997ed87b17fa6a0c210c",
+        "fixed2-audit-engine.log": "78878f7c6d693114e2aa006d950da6b15e7343e57c8bd8681f39c44c847763d7",
+        "fixed2-audit-pass1.txt": "85356e3e4c596f1f4f83ab666b7495b2f9ce8ad52d3d7e26b7ca6754d7a47fc6",
+        "fixed2-audit-server.log": "a2c30c6158ef4f217967e5cb3f019594256781dd8ac9ef98138ec985037b3bb1",
+        "fixed2-audit.json": "303873e0628f16503dfa416de98436fedd2999ac9a843a02f73caedeaea4721a",
+        "original-config.json": "0a9bba642ec0b10ca5e75abb72c840f66907e73512beea6a753afb4f614127d5",
+        "status.json": "3e6cebdef56d33b4853499e846adacad5bf5a0932f2e2314a7977f449037937c",
+        "vision-memory.json": "e510b185aace964aa266211b5c6a2e8901fe8e3f1cc133771e203ac18aa8c46c"
+      }
+    },
+    {
+      "phase": "complete",
+      "restored": true,
+      "error": null,
+      "binary_sha256": "14eb717772caa6fa079f956e8622a9307610739d421ca183126a3efb10628955",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+      "results": [
+        {
+          "label": "fixed1-private",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 37.6,
+              "ram_fetches_per_tok": 41.8,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 33.3,
+              "ram_fetches_per_tok": 56.6,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 175.46097078400211,
+            "remote_helper_pct_one_core": 460.04151287838044,
+            "harness_wall_seconds": 58.183879608004645
+          }
+        },
+        {
+          "label": "fixed1-private",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 38.5,
+              "ram_fetches_per_tok": 40.9,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 33.6,
+              "ram_fetches_per_tok": 55.7,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 175.4819914722106,
+            "remote_helper_pct_one_core": 459.739136816907,
+            "harness_wall_seconds": 57.43039451199729
+          }
+        },
+        {
+          "label": "fixed2-private",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.0,
+              "ram_fetches_per_tok": 49.6,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 33.5,
+              "ram_fetches_per_tok": 62.0,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 179.29928015680426,
+            "remote_helper_pct_one_core": 460.27167930383376,
+            "harness_wall_seconds": 58.88478743900487
+          }
+        },
+        {
+          "label": "fixed2-private",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.3,
+              "ram_fetches_per_tok": 49.4,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 32.8,
+              "ram_fetches_per_tok": 63.9,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 179.13750949254992,
+            "remote_helper_pct_one_core": 461.3242469506571,
+            "harness_wall_seconds": 59.23382562400366
+          }
+        }
+      ],
+      "name": "codex-window-scratch-20261027",
+      "configurations": [
+        {
+          "label": "fixed1-private",
+          "binary": "maya-window-scratch-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_WIN_AUDIT": "1",
+            "MAYA_GLM_SPEC_PROF": "1",
+            "MAYA_GLM_MTP_FIXED": "1",
+            "MAYA_GLM_WIN_SCRATCH_ROWS": "2"
+          }
+        },
+        {
+          "label": "fixed2-private",
+          "binary": "maya-window-scratch-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_MTP_DECODE": "1",
+            "MAYA_GLM_WIN_STAGGER": "0",
+            "MAYA_GLM_WIN_AUDIT": "1",
+            "MAYA_GLM_SPEC_PROF": "1",
+            "MAYA_GLM_MTP_FIXED": "2",
+            "MAYA_GLM_WIN_SCRATCH_ROWS": "3"
+          }
+        }
+      ],
+      "contexts": {
+        "fixed1-private-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19565.398594000726,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12855.9,
+              "prompt_per_token_ms": 0.778,
+              "prompt_per_second": 1285.3,
+              "predicted_n": 218,
+              "predicted_ms": 6693.0,
+              "predicted_per_token_ms": 30.702,
+              "predicted_per_second": 32.6,
+              "draft_n": 115,
+              "draft_n_accepted": 102
+            },
+            "outside_native_ms": 16.49859400072637,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6518.1627179990755,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 39.4,
+              "prompt_per_token_ms": 39.4,
+              "prompt_per_second": 25.4,
+              "predicted_n": 221,
+              "predicted_ms": 6427.5,
+              "predicted_per_token_ms": 29.084,
+              "predicted_per_second": 34.4,
+              "draft_n": 116,
+              "draft_n_accepted": 104
+            },
+            "outside_native_ms": 51.2627179990759,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "fixed2-private-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19945.895765005844,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12760.4,
+              "prompt_per_token_ms": 0.772,
+              "prompt_per_second": 1294.9,
+              "predicted_n": 225,
+              "predicted_ms": 7168.8,
+              "predicted_per_token_ms": 31.861,
+              "predicted_per_second": 31.4,
+              "draft_n": 178,
+              "draft_n_accepted": 135
+            },
+            "outside_native_ms": 16.695765005843896,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6681.492425996112,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 36.6,
+              "prompt_per_token_ms": 36.6,
+              "prompt_per_second": 27.3,
+              "predicted_n": 225,
+              "predicted_ms": 6593.0,
+              "predicted_per_token_ms": 29.302,
+              "predicted_per_second": 34.1,
+              "draft_n": 174,
+              "draft_n_accepted": 137
+            },
+            "outside_native_ms": 51.89242599611134,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ]
+      },
+      "window_audits": {
+        "fixed1-private-engine": [
+          "glm window audit: 110 windows, 220 rows, 110 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 45.123: setup 0.425, discarded attempts 0.000, final attempt 44.697, other 0.000 | by T windows/replays 2:110/0",
+          "glm window audit: 110 windows, 220 rows, 110 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 46.230: setup 0.465, discarded attempts 0.000, final attempt 45.765, other 0.000 | by T windows/replays 2:110/0",
+          "glm window audit: 102 windows, 204 rows, 102 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 55.130: setup 0.505, discarded attempts 0.000, final attempt 54.624, other 0.000 | by T windows/replays 2:102/0",
+          "glm window audit: 117 windows, 234 rows, 117 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 43.526: setup 0.481, discarded attempts 0.000, final attempt 43.045, other 0.000 | by T windows/replays 2:117/0",
+          "glm window audit: 108 windows, 216 rows, 108 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 57.115: setup 0.460, discarded attempts 0.000, final attempt 56.655, other 0.000 | by T windows/replays 2:108/0",
+          "glm window audit: 107 windows, 214 rows, 107 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 53.689: setup 0.454, discarded attempts 0.000, final attempt 53.234, other 0.000 | by T windows/replays 2:107/0",
+          "glm window audit: 106 windows, 212 rows, 106 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 58.159: setup 0.463, discarded attempts 0.000, final attempt 57.696, other 0.000 | by T windows/replays 2:106/0",
+          "glm window audit: 102 windows, 204 rows, 102 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 53.178: setup 0.489, discarded attempts 0.000, final attempt 52.689, other 0.000 | by T windows/replays 2:102/0",
+          "glm window audit: 61 windows, 122 rows, 61 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 49.079: setup 0.447, discarded attempts 0.000, final attempt 48.631, other 0.000 | by T windows/replays 2:61/0",
+          "glm window audit: 106 windows, 212 rows, 106 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 45.627: setup 0.436, discarded attempts 0.000, final attempt 45.191, other 0.000 | by T windows/replays 2:106/0",
+          "glm window audit: 109 windows, 218 rows, 109 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 45.527: setup 0.439, discarded attempts 0.000, final attempt 45.087, other 0.000 | by T windows/replays 2:109/0",
+          "glm window audit: 100 windows, 200 rows, 100 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 54.532: setup 0.450, discarded attempts 0.000, final attempt 54.082, other 0.000 | by T windows/replays 2:100/0",
+          "glm window audit: 115 windows, 230 rows, 115 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 43.293: setup 0.426, discarded attempts 0.000, final attempt 42.866, other 0.000 | by T windows/replays 2:115/0",
+          "glm window audit: 106 windows, 212 rows, 106 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 57.367: setup 0.451, discarded attempts 0.000, final attempt 56.916, other 0.000 | by T windows/replays 2:106/0",
+          "glm window audit: 111 windows, 222 rows, 111 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 50.827: setup 0.446, discarded attempts 0.000, final attempt 50.381, other 0.000 | by T windows/replays 2:111/0",
+          "glm window audit: 103 windows, 206 rows, 103 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 59.079: setup 0.471, discarded attempts 0.000, final attempt 58.608, other 0.000 | by T windows/replays 2:103/0",
+          "glm window audit: 103 windows, 206 rows, 103 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 53.020: setup 0.448, discarded attempts 0.000, final attempt 52.572, other 0.000 | by T windows/replays 2:103/0",
+          "glm window audit: 61 windows, 122 rows, 61 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 49.455: setup 0.451, discarded attempts 0.000, final attempt 49.004, other 0.000 | by T windows/replays 2:61/0",
+          "glm window audit: 115 windows, 230 rows, 115 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 57.016: setup 0.452, discarded attempts 0.000, final attempt 56.563, other 0.000 | by T windows/replays 2:115/0",
+          "glm window audit: 116 windows, 232 rows, 116 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 54.203: setup 0.444, discarded attempts 0.000, final attempt 53.759, other 0.000 | by T windows/replays 2:116/0"
+        ],
+        "fixed2-private-engine": [
+          "glm window audit: 85 windows, 255 rows, 85 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 62.532: setup 0.414, discarded attempts 0.000, final attempt 62.118, other 0.000 | by T windows/replays 3:85/0",
+          "glm window audit: 81 windows, 243 rows, 81 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 63.357: setup 0.466, discarded attempts 0.000, final attempt 62.890, other 0.000 | by T windows/replays 3:81/0",
+          "glm window audit: 71 windows, 213 rows, 71 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 76.205: setup 0.453, discarded attempts 0.000, final attempt 75.751, other 0.000 | by T windows/replays 3:71/0",
+          "glm window audit: 95 windows, 285 rows, 95 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 57.866: setup 0.434, discarded attempts 0.000, final attempt 57.431, other 0.000 | by T windows/replays 3:95/0",
+          "glm window audit: 81 windows, 242 rows, 81 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 75.660: setup 0.462, discarded attempts 0.000, final attempt 75.197, other 0.000 | by T windows/replays 2:1/0 3:80/0",
+          "glm window audit: 78 windows, 233 rows, 78 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 70.836: setup 0.458, discarded attempts 0.000, final attempt 70.378, other 0.000 | by T windows/replays 2:1/0 3:77/0",
+          "glm window audit: 76 windows, 227 rows, 76 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 81.074: setup 0.479, discarded attempts 0.000, final attempt 80.595, other 0.000 | by T windows/replays 2:1/0 3:75/0",
+          "glm window audit: 74 windows, 222 rows, 74 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 72.330: setup 0.500, discarded attempts 0.000, final attempt 71.829, other 0.000 | by T windows/replays 3:74/0",
+          "glm window audit: 43 windows, 129 rows, 43 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 66.154: setup 0.481, discarded attempts 0.000, final attempt 65.674, other 0.000 | by T windows/replays 3:43/0",
+          "glm window audit: 83 windows, 249 rows, 83 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 62.441: setup 0.443, discarded attempts 0.000, final attempt 61.998, other 0.000 | by T windows/replays 3:83/0",
+          "glm window audit: 82 windows, 246 rows, 82 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 61.858: setup 0.516, discarded attempts 0.000, final attempt 61.342, other 0.000 | by T windows/replays 3:82/0",
+          "glm window audit: 71 windows, 213 rows, 71 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 75.778: setup 0.540, discarded attempts 0.000, final attempt 75.238, other 0.000 | by T windows/replays 3:71/0",
+          "glm window audit: 95 windows, 284 rows, 95 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 58.013: setup 0.446, discarded attempts 0.000, final attempt 57.567, other 0.000 | by T windows/replays 2:1/0 3:94/0",
+          "glm window audit: 79 windows, 236 rows, 79 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 79.529: setup 0.469, discarded attempts 0.000, final attempt 79.060, other 0.000 | by T windows/replays 2:1/0 3:78/0",
+          "glm window audit: 79 windows, 237 rows, 79 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 70.888: setup 0.493, discarded attempts 0.000, final attempt 70.395, other 0.000 | by T windows/replays 3:79/0",
+          "glm window audit: 78 windows, 233 rows, 78 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 80.453: setup 0.464, discarded attempts 0.000, final attempt 79.989, other 0.000 | by T windows/replays 2:1/0 3:77/0",
+          "glm window audit: 75 windows, 224 rows, 75 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 72.548: setup 0.473, discarded attempts 0.000, final attempt 72.074, other 0.000 | by T windows/replays 2:1/0 3:74/0",
+          "glm window audit: 44 windows, 132 rows, 44 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 66.748: setup 0.473, discarded attempts 0.000, final attempt 66.275, other 0.000 | by T windows/replays 3:44/0",
+          "glm window audit: 89 windows, 267 rows, 89 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 78.111: setup 0.458, discarded attempts 0.000, final attempt 77.652, other 0.000 | by T windows/replays 3:89/0",
+          "glm window audit: 87 windows, 261 rows, 87 attempts, 0 scratch replays (0.00%), group clashes 0/0 | inclusive host ms/window 73.282: setup 0.458, discarded attempts 0.000, final attempt 72.824, other 0.000 | by T windows/replays 3:87/0"
+        ]
+      },
+      "files": {
+        "fixed1-private-context.jsonl": "4eab927709d867218987d4adc7ba9b099e06aaf5ba58e7787c7cb5f88a1bd8d1",
+        "fixed1-private-context.txt": "4eab927709d867218987d4adc7ba9b099e06aaf5ba58e7787c7cb5f88a1bd8d1",
+        "fixed1-private-engine.log": "0842e483c9e90eca6ca34bf33d5c5abcb93b7f5b5e69cd73dd75de8ed10fdfb5",
+        "fixed1-private-pass1.txt": "1a7bbdc677f0a72a74c6a4316916e9ac9b37f18e6ccc6c9c7e9915b3352cfacd",
+        "fixed1-private-pass2.txt": "8399b5c2c5534c7e7810601d2495fa3a2911b2f6635960669634735a5881e2a6",
+        "fixed1-private-server.log": "441fa6a9405a57aa3e26d449562d525ac15550d36e867e970792de5f96f6e0a9",
+        "fixed1-private.json": "cb23527118dd02ec736dce57ca582a19007203e5652ad8e17d0964407185c303",
+        "fixed2-private-context.jsonl": "d9467ba30cc8b7216afd35b3461e225afcded5d6447a2d869b8d354997b50f8b",
+        "fixed2-private-context.txt": "d9467ba30cc8b7216afd35b3461e225afcded5d6447a2d869b8d354997b50f8b",
+        "fixed2-private-engine.log": "3ce262d9e4ba2bdac66064f46d503ab62b4e2693f64038fede5d5733b42010cf",
+        "fixed2-private-pass1.txt": "6dbe186c392196e44b76e34c84251d8a86df748f8a6d39ae738de50e75c1aa80",
+        "fixed2-private-pass2.txt": "52c07a1733097dd40f4660c89509f8398f3a9fd430310ddecc54f663bc29ac73",
+        "fixed2-private-server.log": "141d8f1218e0a059912873a7d03b07960f68baf2707f7a38b265277aa4349e3b",
+        "fixed2-private.json": "d09b55ebc7b8320f8aa9fc7eb09902e8d21fda9db8db2c28d8d3dc8e2036c107",
+        "original-config.json": "0a9bba642ec0b10ca5e75abb72c840f66907e73512beea6a753afb4f614127d5",
+        "status.json": "964400e1abca082d44592c6c11454f7d35357f1a98f16f441426ffe61f1afbc3",
+        "vision-memory.json": "e510b185aace964aa266211b5c6a2e8901fe8e3f1cc133771e203ac18aa8c46c"
+      }
+    },
+    {
+      "phase": "complete",
+      "restored": true,
+      "error": null,
+      "binary_sha256": "9e8a82a7c0ce3190bcbb1d06a7c877f9ec0bbd777601e84d60af8aeebd558888",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+      "results": [
+        {
+          "label": "plain-tier",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.2,
+              "ram_fetches_per_tok": 35.8,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.6,
+              "ram_fetches_per_tok": 49.2,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.4903649016533,
+            "remote_helper_pct_one_core": 457.1551065838909,
+            "harness_wall_seconds": 60.03432884100039
+          }
+        },
+        {
+          "label": "plain-tier",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 36.5,
+              "ram_fetches_per_tok": 35.2,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 31.6,
+              "ram_fetches_per_tok": 49.3,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 162.66840965636678,
+            "remote_helper_pct_one_core": 457.1857844720986,
+            "harness_wall_seconds": 59.73501567100175
+          }
+        },
+        {
+          "label": "next-layer-prefetch",
+          "pass": 1,
+          "metrics": {
+            "chat": {
+              "tok_s": 35.4,
+              "ram_fetches_per_tok": 34.3,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 30.6,
+              "ram_fetches_per_tok": 47.3,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 165.08581860187394,
+            "remote_helper_pct_one_core": 456.9232254599367,
+            "harness_wall_seconds": 61.5376904329969
+          }
+        },
+        {
+          "label": "next-layer-prefetch",
+          "pass": 2,
+          "metrics": {
+            "chat": {
+              "tok_s": 35.6,
+              "ram_fetches_per_tok": 33.8,
+              "local_cpu_experts_per_tok": 0.0
+            },
+            "code": {
+              "tok_s": 30.7,
+              "ram_fetches_per_tok": 46.5,
+              "local_cpu_experts_per_tok": 0.0
+            }
+          },
+          "cpu": {
+            "main_engine_pct_one_core": 165.47565724977792,
+            "remote_helper_pct_one_core": 457.3175151766233,
+            "harness_wall_seconds": 61.18724752799608
+          }
+        }
+      ],
+      "name": "codex-tier-audit-20261027",
+      "configurations": [
+        {
+          "label": "next-layer-prefetch",
+          "binary": "maya-tier-audit-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_TIER_AUDIT": "1",
+            "MAYA_GLM_PREFETCH_N": "1",
+            "MAYA_GLM_PREFETCH_AT": "fetch",
+            "MAYA_GLM_PREFETCH_BLOCKS": "4",
+            "MAYA_GLM_PREFETCH_RANK": "2"
+          }
+        },
+        {
+          "label": "plain-tier",
+          "binary": "maya-tier-audit-20261027",
+          "args": [
+            "--glm-pack",
+            "/home/caterpillar/models/glm53-iq4xs/GLM-5.3-Flash-BF16-IQ4_XS/pack",
+            "--max-context",
+            "262144",
+            "--expert-cache",
+            "auto",
+            "--prefill",
+            "32768",
+            "--kv-streaming",
+            "on",
+            "--expert-profile",
+            "/home/caterpillar/fn/profile-mix4agent.bin",
+            "--vram-reserve-mib",
+            "1536",
+            "--vram-reserve-later-mib",
+            "978",
+            "--kv",
+            "int8",
+            "--prompt-cache-every",
+            "32768"
+          ],
+          "env": {
+            "MAYA_GLM_CKPT_EVERY": "32768",
+            "MAYA_GLM_RAM_HEADROOM_GB": "20",
+            "MAYA_GLM_SLOT_RAM_GB": "2",
+            "MAYA_GLM_EXPERT_HELPER": "1",
+            "MAYA_GLM_SPLIT": "0",
+            "MAYA_GLM_CPU_LANE": "1",
+            "MAYA_GLM_NET_HELPER": "listen:18800,listen:18801",
+            "MAYA_GLM_NET_PREFILL_MAX": "1280",
+            "MAYA_GLM_CPU_PLAN": "001112233",
+            "MAYA_GLM_NET_COPY": "2",
+            "MAYA_GLM_NET_COPY_GB": "84",
+            "MAYA_GLM_NET_COPY_LOCAL": "0",
+            "MAYA_GLM_KEEP_ANSWER": "1",
+            "MAYA_GLM_COPY_AWARE": "1",
+            "MAYA_GLM_NET_COPY_MS": "0.16",
+            "MAYA_GLM_NET_COPY_RTT": "0.35",
+            "MAYA_GLM_NET_COPY_RTT_SHARED": "0.10",
+            "MAYA_GLM_NET_COPY_PROFILE": "/home/caterpillar/fn/net-copy-demand-agent-20261027.txt",
+            "MAYA_GLM_TIER_AUDIT": "1"
+          }
+        }
+      ],
+      "contexts": {
+        "next-layer-prefetch-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19634.253789998183,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12135.4,
+              "prompt_per_token_ms": 0.734,
+              "prompt_per_second": 1361.6,
+              "predicted_n": 224,
+              "predicted_ms": 7482.8,
+              "predicted_per_token_ms": 33.405,
+              "predicted_per_second": 29.9,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 16.053789998183674,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 7245.324366995192,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 33.6,
+              "prompt_per_token_ms": 33.6,
+              "prompt_per_second": 29.8,
+              "predicted_n": 224,
+              "predicted_ms": 7161.3,
+              "predicted_per_token_ms": 31.97,
+              "predicted_per_second": 31.3,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 50.42436699519112,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "plain-tier-context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19352.38047400344,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12137.4,
+              "prompt_per_token_ms": 0.735,
+              "prompt_per_second": 1361.4,
+              "predicted_n": 225,
+              "predicted_ms": 7197.9,
+              "predicted_per_token_ms": 31.991,
+              "predicted_per_second": 31.3,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 17.08047400344003,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6998.778835004487,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 32.8,
+              "prompt_per_token_ms": 32.8,
+              "prompt_per_second": 30.5,
+              "predicted_n": 225,
+              "predicted_ms": 6915.6,
+              "predicted_per_token_ms": 30.736,
+              "predicted_per_second": 32.5,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 50.378835004486064,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ]
+      },
+      "window_audits": {},
+      "files": {
+        "final-verification.json": "c9e805b6f99dec11b383c31dd9c1363798e6412f525f7f11d1b8b270e096ee1d",
+        "next-layer-prefetch-context.jsonl": "736f8ceb9140e837d59af1f22390b24e73b1dc08c8f3dabcd0f08f487e42ce06",
+        "next-layer-prefetch-context.txt": "736f8ceb9140e837d59af1f22390b24e73b1dc08c8f3dabcd0f08f487e42ce06",
+        "next-layer-prefetch-engine.log": "bb9e5e11325771435a91af2157f50b2490a4f4d395fa88e59aea55f6b3fb4078",
+        "next-layer-prefetch-pass1.txt": "9c4a92d4c98c4148e1e4a56e79197740d95a5f15fc8ad395c1e76e48abf9b1ea",
+        "next-layer-prefetch-pass2.txt": "454341c3ff3db6b51794645457af348df1a6691e48ef92a136574e2e5acab3a2",
+        "next-layer-prefetch-server.log": "3afa734c76ee6130d36f6d3ab28c6a5bdeedd4c1f892a139f632004fe4bcdabd",
+        "next-layer-prefetch.json": "00c3b26a0d9526abe32233b7fb718ba3e1b33f6593f39fb7707612d983f17e35",
+        "original-config.json": "0a9bba642ec0b10ca5e75abb72c840f66907e73512beea6a753afb4f614127d5",
+        "plain-tier-context.jsonl": "b5cce9ab08348e3a167e8ffe5492a29d93c444f8e6c424f0cbf44d94fc9ff01c",
+        "plain-tier-context.txt": "b5cce9ab08348e3a167e8ffe5492a29d93c444f8e6c424f0cbf44d94fc9ff01c",
+        "plain-tier-engine.log": "2a20aef07b1bd2c25cc67b6f9b402b5296bc7e92f6cddd79f66e73d63fb438c1",
+        "plain-tier-pass1.txt": "03580f07f5ea58f0f4cd10b73a5e93bf320da604d2993a305de6ea277456241d",
+        "plain-tier-pass2.txt": "6856301c6abb9ecd88e9add735ab372db17fa3d85e6888899a7f0eadab1dc3a2",
+        "plain-tier-server.log": "c91261b306d6825b0a1b6c38d2dc564905c18fbebb211e8c95bf9b937723fcae",
+        "plain-tier.json": "31320b3b698b8078e7310c5570aaf35aca39dc8536f5aa354f3bd8cfb10d1b2b",
+        "status.json": "17ccb9598ccde0da7ab630109b7f685af9d79330e1265ccdb9e433de86b5a1ec",
+        "vision-memory.json": "e510b185aace964aa266211b5c6a2e8901fe8e3f1cc133771e203ac18aa8c46c"
+      }
+    }
+  ]
+}
