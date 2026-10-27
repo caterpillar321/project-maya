@@ -136,6 +136,8 @@ public:
         double pool_gb = 0, ram_gb = 0;
     };
     FastStats fast_stats() const;
+    /// TIER_AUDIT: host-only decode interval; false closes enqueue accounting, fast_prof_flush reports it.
+    void fast_tier_audit(bool begin);
     /// STRATA_GLM_PROF: print the stage profile of the tokens since the last call (a request's) and start over
     void fast_prof_flush();
     /// What a part holds on its GPU, in bytes (generate's VRAM lines, the Monitor's map of a GPU): the device's total

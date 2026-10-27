@@ -890,6 +890,26 @@ struct Glm5Model::FastState {
     int miss_from_req = -1;
     std::atomic<uint64_t> scratch_uses{0}, demotions{0}, drops{0};
     std::atomic<uint64_t> miss_us{0}, disk_us{0};
+    // TIER_AUDIT: host-only expert-payload accounting between the driver's decode begin/end hooks.
+    // All mutable fields below use mu (already held at the service and boundary accounting sites).
+    // These are submitted payloads / route metadata, not completed DMA bytes or total PCIe traffic.
+    bool tier_audit_on = false;
+    struct TierAudit {
+        struct Payload {
+            uint64_t count = 0, bytes = 0;
+            void add(uint64_t n, size_t blob) { count += n; bytes += n * (uint64_t) blob; }
+        } boundary_d2h, background_d2h, background_h2d, ram_fetch, disk_miss, prefetch;
+        bool active = false, ready = false;
+        uint64_t begin_expected = 0, end_expected = 0, boundaries = 0, routes = 0;
+        uint64_t trunk_routes = 0, draft_routes = 0;
+        bool takes_route(unsigned int seq) const {
+            // The ring uses uint32 sequence numbers. Exclude a late prompt route; after end, still accept
+            // this request's late metadata until flush, but never post-decode work. A request is < 2^31 routes.
+            const unsigned int offset = seq - (unsigned int) (begin_expected + 1);
+            return (active || ready) && offset < 0x80000000u &&
+                   (active || (uint64_t) offset < end_expected - begin_expected);
+        }
+    } tier_audit;
     uint64_t tokens = 0;
     double ms = 0;
     bool timing = false;

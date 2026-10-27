@@ -665,6 +665,7 @@ bool Glm5Model::fast_setup(std::string& err) {
     F->timing = getenv("STRATA_GLM_TIMING") != nullptr;
     F->prof_on = getenv("STRATA_GLM_PROF") != nullptr;
     if (F->prof_on) F->pskip = (uint64_t) std::max(0, std::atoi(getenv("STRATA_GLM_PROF")));
+    if (const char* v = getenv("STRATA_GLM_TIER_AUDIT")) F->tier_audit_on = std::atoi(v) != 0;
     if (const char* pn = getenv("STRATA_GLM_PREFETCH_N")) {
         F->max_pf = std::max(0, std::min(gf::kSpares - 1, std::atoi(pn)));
         // said at start: the prefetch's settings are read once and nothing else shows them (#6)
@@ -4444,10 +4445,62 @@ void Glm5Model::set_read_chunks(int n) {
         if (m->fast_ != nullptr) m->fast_->read_chunks = n > 0 ? std::min(16, n) : 0;
 }
 
+void Glm5Model::fast_tier_audit(bool begin) {
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        FastState* F = m->fast_;
+        if (F == nullptr || !F->tier_audit_on) continue;
+        std::lock_guard<std::mutex> lk(F->mu);
+        auto& a = F->tier_audit;
+        if (begin) {
+            a = FastState::TierAudit{};
+            a.begin_expected = F->expected;
+            a.active = true;
+        } else if (a.active) {
+            a.end_expected = F->expected;
+            a.active = false;
+            a.ready = true;
+        }
+    }
+}
+
 void Glm5Model::fast_prof_flush() {
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         FastState* F = m->fast_;
-        if (F == nullptr || !F->prof_on || F->ptokens == 0) continue;
+        if (F == nullptr) continue;
+        if (F->tier_audit_on) {
+            FastState::TierAudit a;
+            uint64_t pending = 0;
+            {
+                std::lock_guard<std::mutex> lk(F->mu);
+                a = F->tier_audit;
+                F->tier_audit.ready = false;
+                const uint64_t done = F->processed.load(std::memory_order_acquire);
+                pending = a.end_expected > done ? a.end_expected - done : 0;
+            }
+            if (a.ready) {
+                const auto ull = [](uint64_t v) { return (unsigned long long) v; };
+                const uint64_t issued = a.end_expected - a.begin_expected;
+                std::fprintf(stderr, "glm tier audit request CUDA%d: boundaries=%llu expected_routes=%llu "
+                                     "observed_routes=%llu trunk_routes=%llu draft_routes=%llu "
+                                     "metadata_missing=%llu service_pending=%llu | "
+                                     "boundary_d2h_count=%llu boundary_d2h_bytes=%llu "
+                                     "background_d2h_count=%llu background_d2h_bytes=%llu "
+                                     "background_h2d_count=%llu background_h2d_bytes=%llu\n",
+                             m->dev_, ull(a.boundaries), ull(issued), ull(a.routes), ull(a.trunk_routes),
+                             ull(a.draft_routes), ull(issued > a.routes ? issued - a.routes : 0), ull(pending),
+                             ull(a.boundary_d2h.count), ull(a.boundary_d2h.bytes),
+                             ull(a.background_d2h.count), ull(a.background_d2h.bytes),
+                             ull(a.background_h2d.count), ull(a.background_h2d.bytes));
+                std::fprintf(stderr, "glm tier audit route payload CUDA%d: ram_fetch_count=%llu ram_fetch_bytes=%llu "
+                                     "disk_miss_count=%llu disk_miss_bytes=%llu prefetch_count=%llu prefetch_bytes=%llu | "
+                                     "scope=decode_expert_payload enqueue_and_route_metadata_only; "
+                                     "excludes=prefill_park_load,preload_worker,helper_transfers,KV,activations,metadata; "
+                                     "not_total_PCIe_or_DMA_completion\n",
+                             m->dev_, ull(a.ram_fetch.count), ull(a.ram_fetch.bytes),
+                             ull(a.disk_miss.count), ull(a.disk_miss.bytes), ull(a.prefetch.count), ull(a.prefetch.bytes));
+            }
+        }
+        if (!F->prof_on || F->ptokens == 0) continue;
         std::vector<std::pair<double, std::string>> v;
         double tot = 0;
         for (auto& kv : F->pacc) {
@@ -4711,6 +4764,18 @@ void Glm5Model::fast_service() {
             const unsigned int miss = rq->miss_mask, fetch = rq->fetch_mask, promo = rq->promo_mask;
             const unsigned int cpu = rq->cpu_mask;   // the CPU lane's experts: not in VRAM, computed below
             const unsigned int skip = rq->skip_mask;   // DISK SKIP: left out of this token (neither hit nor read)
+            if (F->tier_audit_on && F->tier_audit.takes_route(next)) {
+                auto& a = F->tier_audit;
+                ++a.routes;
+                if (il == mtp_il_) ++a.draft_routes;
+                else ++a.trunk_routes;
+                // The masks describe requested expert blobs, not helper work or measured bus transactions.
+                // SM fetch rounds each blob to 16 bytes; these counters retain the exact logical Ly.blob size.
+                a.ram_fetch.add((uint64_t) std::popcount(fetch), F->L[(size_t) il].blob);
+                a.disk_miss.add((uint64_t) std::popcount(miss), F->L[(size_t) il].blob);
+                if (rq->pf_n > 0 && il + 1 < (int) F->L.size())
+                    a.prefetch.add((uint64_t) std::min(rq->pf_n, 8), F->L[(size_t) il + 1].blob);
+            }
             if (skip != 0u) F->disk_skips.fetch_add((uint64_t) std::popcount(skip), std::memory_order_relaxed);
             auto& P = F->lp[(size_t) il];
             auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
@@ -5559,6 +5624,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     const Glm5Geometry& g = g_;
     while (F->processed.load(std::memory_order_acquire) < F->expected) cpu_relax();
     std::lock_guard<std::mutex> lk(F->mu);
+    if (F->tier_audit.active) ++F->tier_audit.boundaries;
     int nu = 0;
     bool ok = true;
     const auto flush = [&] {
@@ -5794,8 +5860,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 R.tick[(size_t) rs] = F->clock;
                 R.st[(size_t) rs] = FastState::kRDemote;
                 F->ram_of[(size_t) vkey] = rs;
-                cudaMemcpyAsync(R.base + (size_t) rs * R.stride, P.slot_ptr(v),
-                                F->L[(size_t) il].blob, cudaMemcpyDeviceToHost, F->copy);
+                const cudaError_t copy_error = cudaMemcpyAsync(R.base + (size_t) rs * R.stride, P.slot_ptr(v),
+                                                               F->L[(size_t) il].blob, cudaMemcpyDeviceToHost, F->copy);
+                if (copy_error == cudaSuccess && F->tier_audit.active)
+                    F->tier_audit.boundary_d2h.add(1, F->L[(size_t) il].blob);
                 cudaEvent_t ev = F->get_event();
                 cudaEventRecord(ev, F->copy);
                 F->draining.push_back(FastState::Drain{il, v, vkey, F->layer_rc[(size_t) il], rs, ev});
@@ -6074,8 +6142,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 if (c.free_slot >= 0) {
                     P.st[(size_t) c.free_slot] = FastState::kLanding;
                     R.st[(size_t) c.rs] = FastState::kRPin;
-                    cudaMemcpyAsync(P.slot_ptr(c.free_slot), R.base + (size_t) c.rs * R.stride, F->L[(size_t) c.il].blob,
-                                    cudaMemcpyHostToDevice, F->copy);
+                    const cudaError_t copy_error = cudaMemcpyAsync(P.slot_ptr(c.free_slot), R.base + (size_t) c.rs * R.stride,
+                                                                   F->L[(size_t) c.il].blob, cudaMemcpyHostToDevice, F->copy);
+                    if (copy_error == cudaSuccess && F->tier_audit.active)
+                        F->tier_audit.background_h2d.add(1, F->L[(size_t) c.il].blob);
                     cudaEvent_t ev = F->get_event();
                     cudaEventRecord(ev, F->copy);
                     F->bg.push_back(FastState::BgMove{c.il, c.free_slot, c.il * NE + c.e, rc, c.rs, true, ev});
@@ -6089,8 +6159,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                     P.st[(size_t) c.cold_slot] = FastState::kDraining;   // (still live in VRAM until the copy landed)
                     R.st[(size_t) rs] = FastState::kRDemote;
                     R.key[(size_t) rs] = vkey;
-                    cudaMemcpyAsync(R.base + (size_t) rs * R.stride, P.slot_ptr(c.cold_slot), F->L[(size_t) c.il].blob,
-                                    cudaMemcpyDeviceToHost, F->copy);
+                    const cudaError_t copy_error = cudaMemcpyAsync(R.base + (size_t) rs * R.stride, P.slot_ptr(c.cold_slot),
+                                                                   F->L[(size_t) c.il].blob, cudaMemcpyDeviceToHost, F->copy);
+                    if (copy_error == cudaSuccess && F->tier_audit.active)
+                        F->tier_audit.background_d2h.add(1, F->L[(size_t) c.il].blob);
                     cudaEvent_t ev = F->get_event();
                     cudaEventRecord(ev, F->copy);
                     F->bg.push_back(FastState::BgMove{c.il, c.cold_slot, vkey, rc, rs, false, ev});

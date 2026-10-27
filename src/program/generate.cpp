@@ -1928,6 +1928,7 @@ static int glm_pack_generate(const Options& o) {
         if (stop_req.load()) finish = "cancel";
         const auto t1 = std::chrono::steady_clock::now();
         const auto st1 = model.fast_stats();
+        model.fast_tier_audit(true);   // after the prompt, independent of STRATA_GLM_PROF
         int64_t produced = 0;
         // one emitted token: the T line, the live tier counters every 8 tokens, the stop conditions (false: stop)
         // LOOP GUARD: a heavily quantized model can fall into repeating a short pattern ("0 0 0 ...") until the
@@ -2103,6 +2104,7 @@ static int glm_pack_generate(const Options& o) {
             }
         }
         const auto t2 = std::chrono::steady_clock::now();
+        model.fast_tier_audit(false);  // exclude later answer snapshots / housekeeping
         const double prompt_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         const double decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
         // the decode phase's expert-tier counters (the fast path; zeros on the reference path)
