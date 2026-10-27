@@ -603,6 +603,7 @@ struct Glm5Model::FastState {
         size_t stride = 0;
         uint8_t* base = nullptr;
         int n = 0;
+        int backing_slots = 0;  // optional warm/refill slack, within this class's existing allocation
         bool registered = false;   // numa_pinned's (mmap + cudaHostRegister), not cudaHostAlloc's
         std::vector<int> key;   // slot -> il * n_expert + e, -1 none
         std::vector<uint64_t> tick;   // the route clock when a route last used it (or it arrived): eviction's recency
@@ -613,6 +614,40 @@ struct Glm5Model::FastState {
     std::vector<RamClass> rc;
     std::vector<int> layer_rc;   // layer -> RAM class
     std::vector<int> ram_of;     // key -> slot in its class, -1
+    // Default-off RAM backing probe. Reservation and retention are separate so KEEP=0/1 can share warm placement.
+    size_t backing_bytes = 0;
+    bool backing_keep = false;
+    int backing_from = 0, backing_to = 0;
+    int backing_verify_limit = 0, backing_verified = 0;
+    int backing_table_checks = 0;
+    std::vector<uint8_t> backing_verify_buf;  // opt-in diagnostic, never allocated by ordinary runs
+    bool backing_layer(int il) const {
+        return backing_keep && backing_bytes > 0 && il >= backing_from && il < backing_to;
+    }
+    bool vram_held(int key, int ne) const {
+        if (key < 0 || key >= n_keys || ne <= 0) return false;
+        const int il = key / ne, s = slot_of[(size_t) key];
+        return il < (int) lp.size() && s >= 0 && s < lp[(size_t) il].n &&
+               lp[(size_t) il].st[(size_t) s] == kResident && lp[(size_t) il].key[(size_t) s] == key % ne;
+    }
+    int held_ram_slot(int il, int key) const {
+        if (key < 0 || key >= n_keys || il < 0 || il >= (int) layer_rc.size()) return -1;
+        const int c = layer_rc[(size_t) il];
+        if (c < 0 || c >= (int) rc.size()) return -1;
+        const auto& R = rc[(size_t) c];
+        const int s = ram_of[(size_t) key];
+        return s >= 0 && s < R.n && R.key[(size_t) s] == key && R.st[(size_t) s] == kRHold ? s : -1;
+    }
+    int backing_count(const RamClass& R, int ne) const {
+        int n = 0;
+        if (!backing_keep || R.backing_slots == 0) return n;
+        for (int s = 0; s < R.n; ++s) {
+            const int key = R.key[(size_t) s];
+            if (R.st[(size_t) s] == kRHold && key >= 0 && backing_layer(key / ne) &&
+                ram_of[(size_t) key] == s && vram_held(key, ne)) ++n;
+        }
+        return n;
+    }
     // STRATA_GLM_TIER_DIAG=1 (debug): how each expert last left the tiers (0 never held, 1 dropped from VRAM, 2 evicted
     // from RAM, 3 dropped by the prompt path's lending), and the disk reads by that cause
     std::vector<uint8_t> left;
@@ -898,7 +933,7 @@ struct Glm5Model::FastState {
         struct Payload {
             uint64_t count = 0, bytes = 0;
             void add(uint64_t n, size_t blob) { count += n; bytes += n * (uint64_t) blob; }
-        } boundary_d2h, background_d2h, background_h2d, ram_fetch, disk_miss, prefetch;
+        } boundary_d2h, background_d2h, background_h2d, ram_fetch, disk_miss, prefetch, backing_reuse;
         bool active = false, ready = false;
         uint64_t begin_expected = 0, end_expected = 0, boundaries = 0, routes = 0;
         uint64_t trunk_routes = 0, draft_routes = 0;

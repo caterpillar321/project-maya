@@ -687,6 +687,35 @@ bool Glm5Model::fast_setup(std::string& err) {
     F->ram_resident = getenv("STRATA_GLM_RAM_RESIDENT") != nullptr && std::atoi(getenv("STRATA_GLM_RAM_RESIDENT")) != 0;
     if (const char* rs = getenv("STRATA_GLM_RAM_SLACK")) F->ram_slack = std::max(0, std::atoi(rs));
     else if (F->ram_resident) F->ram_slack = 16;
+    const auto backing_int = [&](const char* name, int def, int hi, int& out) {
+        const char* v = getenv(name);
+        if (v == nullptr) { out = def; return true; }
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (end == v || *end != '\0' || n < 0 || n > hi) {
+            err = std::string("glm RAM backing: invalid ") + name;
+            return false;
+        }
+        out = (int) n;
+        return true;
+    };
+    int backing_mib = 0, backing_keep = 0;
+    if (!backing_int("STRATA_GLM_RAM_BACKING_MIB", 0, 16384, backing_mib) ||
+        !backing_int("STRATA_GLM_RAM_BACKING_KEEP", 0, 1, backing_keep) ||
+        !backing_int("STRATA_GLM_RAM_BACKING_VERIFY", 0, 4096, F->backing_verify_limit) ||
+        !backing_int("STRATA_GLM_RAM_BACKING_FROM", 0, g.n_layers, F->backing_from) ||
+        !backing_int("STRATA_GLM_RAM_BACKING_TO", g.n_layers, g.n_layers, F->backing_to)) return false;
+    F->backing_bytes = (size_t) backing_mib * 1048576;
+    F->backing_keep = backing_keep != 0;
+    if (F->backing_bytes > 0 || F->backing_keep) {
+        const char* sp = getenv("STRATA_GLM_WIN_SPARES");
+        if (F->backing_bytes == 0 || F->backing_from >= F->backing_to || F->ram_resident ||
+            F->unified_memory || n_parts_ != 1 || (sp != nullptr && std::atoi(sp) != 0)) {
+            err = "glm RAM backing probe needs a positive budget, a nonempty layer range, one discrete trunk, "
+                  "RAM_RESIDENT=0 and WIN_SPARES=0";
+            return false;
+        }
+    }
     if (cudaStreamCreateWithFlags(&F->cs, cudaStreamNonBlocking) != cudaSuccess ||
         cudaStreamCreateWithFlags(&F->copy, cudaStreamNonBlocking) != cudaSuccess ||
         cudaStreamCreateWithFlags(&F->ps, cudaStreamNonBlocking) != cudaSuccess ||
@@ -1763,6 +1792,32 @@ bool Glm5Model::fast_setup(std::string& err) {
             R.st.assign((size_t) n, FastState::kRFree);
             R.tick.assign((size_t) n, 0);
             F->ram_bytes += (size_t) n * R.stride;
+        }
+        // Leave part of the existing allocation unfilled at warm-up. KEEP=0 reserves exactly the same capacity
+        // as KEEP=1, allowing a placement-matched control; no extra pinned allocation or lower precision.
+        if (F->backing_bytes > 0) {
+            std::vector<size_t> weight(F->rc.size(), 0);
+            size_t total_weight = 0, reserved = 0;
+            for (int il = std::max(l0_, F->backing_from); il < std::min(lt_, F->backing_to); ++il) {
+                const int c = F->layer_rc[(size_t) il];
+                if (!F->L[(size_t) il].moe || c < 0) continue;
+                const size_t w = (size_t) F->lp[(size_t) il].n * F->rc[(size_t) c].stride;
+                weight[(size_t) c] += w;
+                total_weight += w;
+            }
+            for (size_t c = 0; c < F->rc.size(); ++c) {
+                auto& R = F->rc[c];
+                const size_t share = total_weight > 0
+                    ? (size_t) ((long double) F->backing_bytes * weight[c] / total_weight) : 0;
+                R.backing_slots = (int) std::min<size_t>(share / R.stride,
+                    std::min<size_t>((size_t) std::max(0, R.n - 16), weight[c] / R.stride));
+                reserved += (size_t) R.backing_slots * R.stride;
+                std::fprintf(stderr, "glm RAM backing class %zu: slots=%d reserve=%d stride=%zu keep=%d\n",
+                             c, R.n, R.backing_slots, R.stride, (int) F->backing_keep);
+            }
+            if (reserved == 0) { err = "glm RAM backing: no eligible reservation fits"; return false; }
+            std::fprintf(stderr, "glm RAM backing: %.1f MiB reserved inside the RAM tier, layers [%d,%d), keep=%d\n",
+                         (double) reserved / 1048576.0, F->backing_from, F->backing_to, (int) F->backing_keep);
         }
         if (split_load_ != nullptr) split_load_->pass_pin(part_);
         if (split_load_ == nullptr && !staging_only && ram_budget_ < 0 && remaining >= 0) {
@@ -3993,7 +4048,7 @@ bool Glm5Model::fast_warm(std::string& err) {
             if (!F->L[(size_t) il].moe || next[(size_t) il] >= g.n_expert) continue;
             const int c = F->layer_rc[(size_t) il];
             auto& R = F->rc[(size_t) c];
-            if (rfree[(size_t) c] <= (F->ram_resident ? 0 : 4)) continue;   // resident: no disk-read slots to keep
+            if (rfree[(size_t) c] <= (F->ram_resident ? 0 : 4) + R.backing_slots) continue;
             while (rcur[(size_t) c] < R.n && R.st[(size_t) rcur[(size_t) c]] != FastState::kRFree) ++rcur[(size_t) c];
             if (rcur[(size_t) c] >= R.n) continue;
             const int s = rcur[(size_t) c]++;
@@ -4455,6 +4510,7 @@ void Glm5Model::fast_tier_audit(bool begin) {
             a = FastState::TierAudit{};
             a.begin_expected = F->expected;
             a.active = true;
+            F->backing_verified = F->backing_table_checks = 0;
         } else if (a.active) {
             a.end_expected = F->expected;
             a.active = false;
@@ -4498,6 +4554,25 @@ void Glm5Model::fast_prof_flush() {
                                      "not_total_PCIe_or_DMA_completion\n",
                              m->dev_, ull(a.ram_fetch.count), ull(a.ram_fetch.bytes),
                              ull(a.disk_miss.count), ull(a.disk_miss.bytes), ull(a.prefetch.count), ull(a.prefetch.bytes));
+                if (F->backing_bytes > 0) {
+                    std::lock_guard<std::mutex> lk(F->mu);
+                    std::fprintf(stderr, "glm RAM backing request CUDA%d: reuse_count=%llu reuse_bytes=%llu "
+                                         "(logical reuse, not net transfer savings)\n", m->dev_,
+                                 ull(a.backing_reuse.count), ull(a.backing_reuse.bytes));
+                    for (size_t c = 0; c < F->rc.size(); ++c) {
+                        const auto& R = F->rc[c];
+                        int nfree = 0, unique = 0, inflight = 0;
+                        for (int s = 0; s < R.n; ++s) {
+                            const char st = R.st[(size_t) s];
+                            nfree += st == FastState::kRFree;
+                            unique += st == FastState::kRHold && !F->vram_held(R.key[(size_t) s], m->g_.n_expert);
+                            inflight += st != FastState::kRFree && st != FastState::kRHold && st != FastState::kRHelper;
+                        }
+                        std::fprintf(stderr, "glm RAM backing class %zu snapshot: reserve=%d backed=%d free=%d "
+                                             "non_primary_held=%d inflight=%d slots=%d\n", c, R.backing_slots,
+                                     F->backing_count(R, m->g_.n_expert), nfree, unique, inflight, R.n);
+                    }
+                }
             }
         }
         if (!F->prof_on || F->ptokens == 0) continue;
@@ -5625,6 +5700,22 @@ bool Glm5Model::fast_boundary(std::string& err) {
     while (F->processed.load(std::memory_order_acquire) < F->expected) cpu_relax();
     std::lock_guard<std::mutex> lk(F->mu);
     if (F->tier_audit.active) ++F->tier_audit.boundaries;
+    const auto verify_backing = [&](int il, int key, int vs, int rs) {
+        if (F->backing_verified >= F->backing_verify_limit) return true;
+        const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+        const size_t bytes = F->L[(size_t) il].blob;
+        F->backing_verify_buf.resize(bytes);
+        if (!glmfast::cuda_ok(cudaMemcpy(F->backing_verify_buf.data(), F->lp[(size_t) il].slot_ptr(vs), bytes,
+                                        cudaMemcpyDeviceToHost), "glm backing verification readback", err)) return false;
+        if (std::memcmp(F->backing_verify_buf.data(), R.base + (size_t) rs * R.stride, bytes) != 0) {
+            err = "glm RAM backing verification mismatch for expert key " + std::to_string(key);
+            return false;
+        }
+        if (++F->backing_verified == F->backing_verify_limit)
+            std::fprintf(stderr, "glm RAM backing verify: %d reused expert blobs match GPU byte-for-byte\n",
+                         F->backing_verified);
+        return true;
+    };
     int nu = 0;
     bool ok = true;
     const auto flush = [&] {
@@ -5676,6 +5767,18 @@ bool Glm5Model::fast_boundary(std::string& err) {
         return (uint64_t) (v ? std::max(0, std::atoi(v)) : 64) * 42u;
     }();
     const auto ram_victim = [&](const FastState::RamClass& R) -> int {
+        // Reclaim a redundant primary-GPU backing before any unique RAM copy. Prefer recent arrivals so an older
+        // backing, whose VRAM slot is nearer LRU eviction, can still avoid a D2H. Only settled slots are eligible.
+        if (F->backing_keep) {
+            int redundant = -1;
+            for (int s = 0; s < R.n; ++s) {
+                const int key = R.key[(size_t) s];
+                if (R.st[(size_t) s] != FastState::kRHold || !F->vram_held(key, g.n_expert) ||
+                    F->ram_of[(size_t) key] != s) continue;
+                if (redundant < 0 || R.tick[(size_t) s] > R.tick[(size_t) redundant]) redundant = s;
+            }
+            if (redundant >= 0) return redundant;
+        }
         int best = -1, oldest = -1;
         uint32_t bc = UINT32_MAX;
         uint64_t bt = UINT64_MAX;
@@ -5703,6 +5806,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     // (1)
     for (size_t c = 0; c < F->rc.size(); ++c) {
         auto& R = F->rc[c];
+        int backed = F->backing_count(R, g.n_expert);
         for (int s = 0; s < R.n; ++s) {
             if (R.st[(size_t) s] == FastState::kRLoad) {
                 // a LOOKAHEAD read nobody asked for yet: in the RAM tier once it landed
@@ -5710,9 +5814,22 @@ bool Glm5Model::fast_boundary(std::string& err) {
                     R.st[(size_t) s] = FastState::kRHold;
                     upd(F->rtab_key(R.key[(size_t) s]), (unsigned long long) (R.base + (size_t) s * R.stride));
                 }
-            } else if (R.st[(size_t) s] == FastState::kRRelease) {
+            } else if (R.st[(size_t) s] == FastState::kRRelease ||
+                       (F->backing_keep && R.st[(size_t) s] == FastState::kRNew &&
+                        F->vram_held(R.key[(size_t) s], g.n_expert))) {
                 const int key = R.key[(size_t) s];
-                if (key >= 0) {
+                const int ro = key >= 0 ? F->ram_of[(size_t) key] : -1;
+                // All of the preceding token/window has completed. A keyed release source can now become a
+                // settled canonical backing. Disk-read staging that already discarded its key stays unchanged.
+                if (key >= 0 && F->backing_layer(key / g.n_expert) && F->vram_held(key, g.n_expert) &&
+                    (ro == s || ro < 0) && backed < R.backing_slots) {
+                    R.st[(size_t) s] = FastState::kRHold;
+                    F->ram_of[(size_t) key] = s;
+                    upd(F->rtab_key(key), (unsigned long long) (R.base + (size_t) s * R.stride));
+                    ++backed;
+                    continue;
+                }
+                if (key >= 0 && (!F->backing_keep || ro == s || ro < 0)) {
                     upd(F->rtab_key(key), 0ull);
                     if (F->ram_of[(size_t) key] == s) F->ram_of[(size_t) key] = -1;
                 }
@@ -5728,6 +5845,8 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 // of the experts in no tier at all, the RAM tier full of duplicates (chats: ~5 disk reads a token)
                 const int key = R.key[(size_t) s];
                 const int ro = key >= 0 ? F->ram_of[(size_t) key] : -1;
+                if (key >= 0 && ro == s && F->backing_layer(key / g.n_expert) &&
+                    F->vram_held(key, g.n_expert)) continue;
                 if (key >= 0 && ro == s && F->slot_of[(size_t) key] < 0) continue;   // the normal case
                 if (key >= 0 && ro < 0 && F->slot_of[(size_t) key] < 0) {
                     F->ram_of[(size_t) key] = s;
@@ -5757,8 +5876,20 @@ bool Glm5Model::fast_boundary(std::string& err) {
         }
         auto& R = F->rc[(size_t) d.rclass];
         if (R.st[(size_t) d.rslot] == FastState::kRDemote && R.key[(size_t) d.rslot] == d.key) {
-            R.st[(size_t) d.rslot] = FastState::kRHold;
-            upd(F->rtab_key(d.key), (unsigned long long) (R.base + (size_t) d.rslot * R.stride));
+            // A route can re-promote the expert while this older demotion lands. That creates a new duplicate
+            // after step (1), so its admission must obey the same cap as a normal promotion source.
+            const bool over_cap = F->backing_layer(d.il) && F->vram_held(d.key, g.n_expert) &&
+                                  F->ram_of[(size_t) d.key] == d.rslot &&
+                                  F->backing_count(R, g.n_expert) >= R.backing_slots;
+            if (over_cap) {
+                R.st[(size_t) d.rslot] = FastState::kRFree;
+                R.key[(size_t) d.rslot] = -1;
+                F->ram_of[(size_t) d.key] = -1;
+                upd(F->rtab_key(d.key), 0ull);
+            } else {
+                R.st[(size_t) d.rslot] = FastState::kRHold;
+                upd(F->rtab_key(d.key), (unsigned long long) (R.base + (size_t) d.rslot * R.stride));
+            }
             if (F->ram_resident) {   // the deferred half of the move: forget the VRAM copy only now
                 upd(F->tab_key((size_t) d.key), 0ull);
                 F->slot_of[(size_t) d.key] = -1;
@@ -5820,6 +5951,22 @@ bool Glm5Model::fast_boundary(std::string& err) {
             }
             if (v < 0) break;
             const int vkey = il * g.n_expert + P.key[(size_t) v];
+            const int backing = F->backing_layer(il) ? F->held_ram_slot(il, vkey) : -1;
+            if (backing >= 0) {
+                if (!verify_backing(il, vkey, v, backing)) return false;
+                // Immutable weights are already safely in RAM. The completed token no longer reads this slot;
+                // publish the table removal before any following route, then immediately reuse it as a spare.
+                upd(F->tab_key(vkey), 0ull);
+                F->slot_of[(size_t) vkey] = -1;
+                R.tick[(size_t) backing] = F->clock;
+                P.st[(size_t) v] = FastState::kSpare;
+                P.key[(size_t) v] = -1;
+                P.spare[j] = v;
+                upd(F->spare_key(il, j), (unsigned long long) P.slot_ptr(v));
+                ++P.evictions;
+                if (F->tier_audit.active) F->tier_audit.backing_reuse.add(1, F->L[(size_t) il].blob);
+                continue;
+            }
             // what the RAM tier weighs it by: its aged count - not the LRU pick's score (0, which made every victim
             // colder than all of RAM: with no free RAM slot the most used of them dropped to the disk)
             const uint32_t vc = F->cnt[(size_t) vkey];
@@ -5848,11 +5995,12 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 rs = ram_victim(R);
                 if (rs >= 0) rc_min = F->cnt[(size_t) R.key[(size_t) rs]];
             }
-            if (rs >= 0 && (R.st[(size_t) rs] == FastState::kRFree || rc_min < vc)) {
+            const bool redundant = rs >= 0 && F->backing_keep && R.st[(size_t) rs] == FastState::kRHold &&
+                                   F->vram_held(R.key[(size_t) rs], g.n_expert);
+            if (rs >= 0 && (R.st[(size_t) rs] == FastState::kRFree || redundant || rc_min < vc)) {
                 if (R.st[(size_t) rs] == FastState::kRHold) {
                     const int old = R.key[(size_t) rs];
-                    F->left[(size_t) old] = 2;
-                    ++F->diag_ram_evict;
+                    if (!redundant) { F->left[(size_t) old] = 2; ++F->diag_ram_evict; }
                     upd(F->rtab_key(old), 0ull);
                     F->ram_of[(size_t) old] = -1;
                 }
@@ -5895,8 +6043,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
             if (best < 0) break;
             upd(F->rtab_key(R.key[(size_t) best]), 0ull);
             F->ram_of[(size_t) R.key[(size_t) best]] = -1;
-            F->left[(size_t) R.key[(size_t) best]] = 2;
-            ++F->diag_ram_evict;
+            if (!F->backing_keep || !F->vram_held(R.key[(size_t) best], g.n_expert)) {
+                F->left[(size_t) R.key[(size_t) best]] = 2;
+                ++F->diag_ram_evict;
+            }
             R.key[(size_t) best] = -1;
             R.st[(size_t) best] = FastState::kRFree;
             ++nfree;
@@ -5921,7 +6071,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
             auto& R = F->rc[c];
             int nfree = 0;
             for (char st : R.st) nfree += st == FastState::kRFree;
-            int budget = std::min(nfree - keep_free, refill - F->ah_inflight.load(std::memory_order_relaxed));
+            // Occupied backings and unfilled reserve share one budget. Do not refill both independently, nor
+            // evict unique data to restore this optional slack after prompt lending consumed some of it.
+            const int slack = std::max(0, R.backing_slots - F->backing_count(R, g.n_expert));
+            int budget = std::min(nfree - keep_free - slack, refill - F->ah_inflight.load(std::memory_order_relaxed));
             if (budget <= 0) continue;
             std::vector<std::pair<uint32_t, int>> cand;   // (usage, key) of this class's experts in no tier
             for (int il = l0_; il < lt_; ++il) {
@@ -5987,12 +6140,20 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 P.tick[(size_t) m.vslot] = F->clock;
                 F->slot_of[(size_t) m.key] = m.vslot;
                 upd(F->tab_key((size_t) m.key), (unsigned long long) P.slot_ptr(m.vslot));
-                if (R.st[(size_t) m.rslot] == FastState::kRPin) {
+                const bool retain = F->backing_layer(m.il) && R.st[(size_t) m.rslot] == FastState::kRPin &&
+                                    R.key[(size_t) m.rslot] == m.key && F->ram_of[(size_t) m.key] == m.rslot &&
+                                    F->backing_count(R, NE) < R.backing_slots;
+                if (retain) {
+                    R.st[(size_t) m.rslot] = FastState::kRHold;
+                    upd(F->rtab_key((size_t) m.key), (unsigned long long) (R.base + (size_t) m.rslot * R.stride));
+                } else if (R.st[(size_t) m.rslot] == FastState::kRPin) {
                     R.st[(size_t) m.rslot] = FastState::kRFree;
                     R.key[(size_t) m.rslot] = -1;
                 }
-                if (F->ram_of[(size_t) m.key] == m.rslot) F->ram_of[(size_t) m.key] = -1;
-                upd(F->rtab_key((size_t) m.key), 0ull);
+                if (!retain) {
+                    if (F->ram_of[(size_t) m.key] == m.rslot) F->ram_of[(size_t) m.key] = -1;
+                    upd(F->rtab_key((size_t) m.key), 0ull);
+                }
                 ++F->bg_up;
             } else {
                 upd(F->tab_key((size_t) m.key), 0ull);
@@ -6151,11 +6312,24 @@ bool Glm5Model::fast_boundary(std::string& err) {
                     F->bg.push_back(FastState::BgMove{c.il, c.free_slot, c.il * NE + c.e, rc, c.rs, true, ev});
                     ++filled;
                 } else if (lane_all && c.cold_slot >= 0 && c.hot >= bg_ratio * std::max<uint32_t>(c.cold, 1u) + 4u) {
+                    const int vkey = c.il * NE + P.key[(size_t) c.cold_slot];
+                    const int backing = F->backing_layer(c.il) ? F->held_ram_slot(c.il, vkey) : -1;
+                    if (backing >= 0) {
+                        if (!verify_backing(c.il, vkey, c.cold_slot, backing)) return false;
+                        upd(F->tab_key((size_t) vkey), 0ull);
+                        F->slot_of[(size_t) vkey] = -1;
+                        P.st[(size_t) c.cold_slot] = FastState::kFree;
+                        P.key[(size_t) c.cold_slot] = -1;
+                        R.tick[(size_t) backing] = F->clock;
+                        if (F->tier_audit.active) F->tier_audit.backing_reuse.add(1, F->L[(size_t) c.il].blob);
+                        ++F->bg_down;
+                        ++issued;
+                        continue;
+                    }
                     int rs = -1;
                     for (int s2 = 0; s2 < R.n && rs < 0; ++s2)
                         if (R.st[(size_t) s2] == FastState::kRFree) rs = s2;
                     if (rs < 0) continue;
-                    const int vkey = c.il * NE + P.key[(size_t) c.cold_slot];
                     P.st[(size_t) c.cold_slot] = FastState::kDraining;   // (still live in VRAM until the copy landed)
                     R.st[(size_t) rs] = FastState::kRDemote;
                     R.key[(size_t) rs] = vkey;
@@ -6181,6 +6355,39 @@ bool Glm5Model::fast_boundary(std::string& err) {
     }
     flush();
     if (ok && !fast_helper_adapt(err)) return false;
+    if (ok && F->backing_verify_limit > 0 && F->backing_table_checks < F->backing_verify_limit) {
+        // Positive invariants only: in-flight Pin/Load/Demote states have different table lifetimes. This check
+        // never assumes that other entries must be zero. It also covers unique RAM sources after prompt lending.
+        std::vector<unsigned long long> table((size_t) F->n_keys * 2);
+        if (!glmfast::cuda_ok(cudaMemcpy(table.data(), F->tab, table.size() * sizeof(table[0]),
+                                        cudaMemcpyDeviceToHost), "glm backing table verification", err)) return false;
+        for (const auto& R : F->rc) {
+            if (F->backing_count(R, g.n_expert) > R.backing_slots) {
+                err = "glm RAM backing: retained duplicates exceed the reserved class budget";
+                return false;
+            }
+            for (int s = 0; s < R.n; ++s) {
+                const int key = R.key[(size_t) s];
+                if (R.st[(size_t) s] != FastState::kRHold || key < 0 || F->ram_of[(size_t) key] != s) continue;
+                const auto ptr = (unsigned long long) (R.base + (size_t) s * R.stride);
+                if (table[F->rtab_key(key)] != ptr) {
+                    err = "glm RAM backing: settled RAM table mismatch for expert key " + std::to_string(key);
+                    return false;
+                }
+            }
+        }
+        for (int key = 0; key < F->n_keys; ++key) {
+            if (!F->vram_held(key, g.n_expert)) continue;
+            const int il = key / g.n_expert, s = F->slot_of[(size_t) key];
+            if (table[F->tab_key(key)] != (unsigned long long) F->lp[(size_t) il].slot_ptr(s)) {
+                err = "glm RAM backing: settled GPU table mismatch for expert key " + std::to_string(key);
+                return false;
+            }
+        }
+        if (++F->backing_table_checks == F->backing_verify_limit)
+            std::fprintf(stderr, "glm RAM backing verify: %d boundary table snapshots and reservation caps agree\n",
+                         F->backing_table_checks);
+    }
     F->check_resident(l0_, lt_, g.n_expert);   // (the tables as the next token's routes find them)
     static const bool diag = getenv("STRATA_GLM_TIER_DIAG") != nullptr;
     if (diag && ++F->diag_b % 64 == 0)

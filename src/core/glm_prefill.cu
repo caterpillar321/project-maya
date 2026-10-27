@@ -1700,12 +1700,21 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
             const cudaError_t e = cudaStreamSynchronize(F->cs);   // pinned sources may now be reused
             if (ok) ok = glmfast::cuda_ok(e, "glm lending table sync", err);
             nu = 0;
+            ++F->upd_g;
         };
-        // (every key is edited at most once here, so a batch never carries two values for one key)
+        ++F->upd_g;
+        // A reclaimed RAM backing may be parked again later in this same lending loop. Merge edits so the
+        // parallel tab_update kernel has only one writer per key, with the final host-side value.
         const auto upd = [&](size_t k, unsigned long long v) {
             if (!ok) return;
+            if (F->upd_gen[k] == F->upd_g) {
+                F->upd_val_h[F->upd_at[k]] = v;
+                return;
+            }
             if (nu == FastState::kMaxUpd) flush();
             if (!ok) return;
+            F->upd_gen[k] = F->upd_g;
+            F->upd_at[k] = nu;
             F->upd_key_h[nu] = (int) k;
             F->upd_val_h[nu] = v;
             ++nu;
@@ -1720,22 +1729,43 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
             if (lend_drop || F->layer_rc[(size_t) il] < 0) return false;
             if (parked.empty()) parked.assign(F->cnt.size(), 0);
             auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            const int backing = F->backing_layer(il) ? F->held_ram_slot(il, key) : -1;
+            if (backing >= 0) {
+                // A later park must not overwrite this source before the borrowed GPU slot is restored.
+                parked[(size_t) key] = 1;
+                R.tick[(size_t) backing] = F->clock;
+                upd(F->rtab_key((size_t) key), (unsigned long long) (R.base + (size_t) backing * R.stride));
+                ++F->diag_lend_park;
+                return true;
+            }
             int rs = -1;
             for (int s2 = 0; s2 < R.n && rs < 0; ++s2)
                 if (R.st[(size_t) s2] == FastState::kRFree) rs = s2;
             if (rs < 0) {
-                uint32_t bc = F->cnt[(size_t) key];
-                for (int s2 = 0; s2 < R.n; ++s2)
-                    if (R.st[(size_t) s2] == FastState::kRHold && !parked[(size_t) R.key[(size_t) s2]] &&
-                        F->cnt[(size_t) R.key[(size_t) s2]] < bc) {
-                        bc = F->cnt[(size_t) R.key[(size_t) s2]];
-                        rs = s2;
+                if (F->backing_keep) {
+                    // Reclaim redundant weights before a unique source. Earlier parked keys are protected even
+                    // when a GPU table entry has not yet been cleared by this lending loop.
+                    for (int s2 = 0; s2 < R.n; ++s2) {
+                        const int old = R.key[(size_t) s2];
+                        if (R.st[(size_t) s2] != FastState::kRHold || old < 0 || parked[(size_t) old] ||
+                            F->ram_of[(size_t) old] != s2 || !F->vram_held(old, NE)) continue;
+                        if (rs < 0 || R.tick[(size_t) s2] > R.tick[(size_t) rs]) rs = s2;
                     }
+                }
+                if (rs < 0) {
+                    uint32_t bc = F->cnt[(size_t) key];
+                    for (int s2 = 0; s2 < R.n; ++s2)
+                        if (R.st[(size_t) s2] == FastState::kRHold && !parked[(size_t) R.key[(size_t) s2]] &&
+                            F->cnt[(size_t) R.key[(size_t) s2]] < bc) {
+                            bc = F->cnt[(size_t) R.key[(size_t) s2]];
+                            rs = s2;
+                        }
+                }
                 if (rs < 0) return false;
                 const int old = R.key[(size_t) rs];
                 upd(F->rtab_key((size_t) old), 0ull);
                 F->ram_of[(size_t) old] = -1;
-                F->left[(size_t) old] = 2;
+                if (!F->backing_keep || !F->vram_held(old, NE)) F->left[(size_t) old] = 2;
             }
             // on the compute stream: the prompt's work behind it cannot overwrite the slot before the copy read it
             if (!glmfast::cuda_ok(cudaMemcpyAsync(R.base + (size_t) rs * R.stride,
