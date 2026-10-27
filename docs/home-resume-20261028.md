@@ -67,3 +67,12 @@ MTP helper의 기존FP32 kCompute 요청 중 이미 완전히 도착한 인접1~
 내부microbatch가 다음 후보입니다. 기다리는timeout/FP16프로토콜변경은 피하고,
 행별CPU expert 원래순서로 subtotal을 만든 뒤 GPU subtotal에한번더해야합니다.
 CPU GU를먼저시작해GPU와overlap을유지해야합니다. 아직구현하지않았습니다.
+
+## 실제 종료 처리 결과
+
+- 메인컴: `sudo -n systemctl poweroff`가 exit0으로 접수되었습니다.
+- 코하네컴: 일반 `systemctl poweroff`는 Interactive authentication required,
+  sudo 종료 명령은 password required로 거절되었습니다. 원격 root key도 허용되지 않습니다.
+  따라서 **PC 전원 종료는 미완료**이며 사용자께 현지 `sudo poweroff`가 필요하다고 안내했습니다.
+- 코하네의 이 작업 helper PID2096/2107은 확인 후 SIGTERM으로 중단했습니다.
+- 재개 시 코하네 전원 상태 및 helper 기동부터 다시 확인해야 합니다.
