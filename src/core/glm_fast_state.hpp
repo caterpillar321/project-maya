@@ -676,10 +676,13 @@ struct Glm5Model::FastState {
     uint32_t upd_g = 0;
     int n_keys = 0;
     uint8_t* scratch = nullptr;
-    // STRATA_GLM_GROUP_EXPERTS: rows 1 .. rows_group - 1's scratch slots, and every row's 8 slot pointers (device)
+    // GROUP_EXPERTS / WIN_SCRATCH_ROWS share one allocation: row 0 uses scratch above;
+    // rows 1 .. rows_group - 1 use rows_scratch, addressed by rows_scr's eight pointers per absolute row.
     uint8_t* rows_scratch = nullptr;
     unsigned long long* rows_scr = nullptr;
-    int rows_group = 0;                        // a group's rows at most (0: grouping off)
+    int rows_group = 0;                        // allocated row capacity (0: no private row slots)
+    int win_scratch_rows = 0;                  // opt-in window capacity, 2 or 3; 0 preserves shared scratch
+    bool win_scratch_logged = false, win_scratch_fallback_logged = false;
     std::vector<uint8_t*> stage;   // pinned: disk reads when no RAM slot is free
     size_t stage_bytes = 0;        // ... each (an expert's blob); the start's uploads go through stage[0] too
     std::mutex mu;   // the service thread vs the between-token boundary

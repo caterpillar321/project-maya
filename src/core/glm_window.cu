@@ -600,7 +600,26 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         return v == nullptr || std::atoi(v) != 0;
     }();
     const bool multi = !batch_env && multi_env && !Ly.exl3 && part == 0 && T > 1;
-    if ((batch_env || multi) && !W.per_token && W.mplan_ptr != nullptr && (T > 1 || part != 0)) {
+    const bool batched = (batch_env || multi) && !W.per_token && W.mplan_ptr != nullptr && (T > 1 || part != 0);
+    if (F->win_scratch_rows > 0 && (t0 < 0 || T < 1 || T > W.T || t0 > W.T - T)) {
+        err = "glm window scratch: token group is outside the current window";
+        return false;
+    }
+    // Use the absolute row, including staggered groups: A(l+1) may reuse A's slots while B(l) still reads B's.
+    // The full window must fit so its two groups cannot silently choose different scratch layouts.
+    const bool private_scratch = F->win_scratch_rows > 0 && W.T <= F->win_scratch_rows &&
+                                 W.T <= F->rows_group && F->rows_scr != nullptr && batched;
+    if (private_scratch && !F->win_scratch_logged) {
+        std::fprintf(stderr, "glm window scratch: CUDA%d active for %d rows; absolute-row slots, shared claims bypassed\n",
+                     dev_, W.T);
+        F->win_scratch_logged = true;
+    } else if (F->win_scratch_rows > 0 && W.T > 1 && !private_scratch && !F->win_scratch_fallback_logged) {
+        std::fprintf(stderr, "glm window scratch: CUDA%d %d rows use the original path (capacity %d, allocated %d, "
+                             "batched %d, per-token %d) - said once\n",
+                     dev_, W.T, F->win_scratch_rows, F->rows_group, (int) batched, (int) W.per_token);
+        F->win_scratch_fallback_logged = true;
+    }
+    if (batched) {
         const auto tok_dev = [&](int t) {
             gf::MoeDev mt = md;
             mt.plan_ptr = W.mplan_ptr + 8 * t;
@@ -609,6 +628,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             mt.fetch_src = W.mfetch + 8 * t;
             mt.cpu_part = W.mcpu_part + (size_t) E * t;
             mt.cpu_flag = W.mcpu_flag + t;
+            if (private_scratch) mt.scratch = F->rows_scr + 8 * t;
             if (t > 0 && md.cpu_seq != nullptr) {
                 mt.cpu_seq = W.cpu_seq_w + 16 * t;
                 mt.cpu_ans = W.ans_d[t];
@@ -619,15 +639,17 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         // claim words that leave a group only its own slots free)
         unsigned int* scr = W.scr + (gid == 1 ? 2 : 0);
         if (part != 2) {
-        if (part == 0) cudaMemsetAsync(W.scr, 0, sizeof(unsigned int), s);
-        else cudaMemcpyAsync(scr, W.scr + 8 + gid, sizeof(unsigned int), cudaMemcpyDeviceToDevice, s);
+        if (!private_scratch) {
+            if (part == 0) cudaMemsetAsync(W.scr, 0, sizeof(unsigned int), s);
+            else cudaMemcpyAsync(scr, W.scr + 8 + gid, sizeof(unsigned int), cudaMemcpyDeviceToDevice, s);
+        }
         for (int t = t0; t < t0 + T; ++t) {
             const gf::MoeDev mt = tok_dev(t);
             gf::moe_route(W.rlog + (size_t) t * g.n_expert, Ly.router_bias, g.n_expert, g.n_exp_used, g.w_scale,
                           g.norm_w != 0, il, W.x + (size_t) t * E, E, mt, W.sh_g + (size_t) t * FFs,
                           W.sh_u + (size_t) t * FFs, g.swiglu_shexp, FFs, (uint8_t*) W.sh_hq + (size_t) t * W.sh_hq_s, s,
                           nullptr, nullptr, 0, nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, 0, 0, t,
-                          scr, t0 + T);
+                          private_scratch ? nullptr : scr, t0 + T);
             ++F->expected;
             // (every expert in VRAM: the wait and the fetch are no-ops - fast_moe's all_resident, 2 launches a token)
             if (!F->all_resident) {

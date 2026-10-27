@@ -1042,8 +1042,22 @@ bool Glm5Model::fast_setup(std::string& err) {
         // has slots [8 i, 8 i + 8) of rows_scr, row 0 the ones above.  The rows' route state (plans, the CPU lane's
         // answer slots, the grouping) is the verify window's, its rows a window's tokens (win_alloc).  Both before the
         // pool takes the card.
-        if (glmfast::group_experts_on() && rows_ != nullptr) {
-            const int R = std::min(rows_max(), n_parts_ > 1 ? split_rows_setting() : seq_count());
+        // A small MTP verification window can use the same row-private layout. Allocate once, before the expert
+        // pool is sized, and keep the original row-grouping policy unchanged. No expert arithmetic is changed.
+        int window_rows = 0;
+        if (const char* v = getenv("STRATA_GLM_WIN_SCRATCH_ROWS"); v != nullptr && *v != '\0') {
+            char* end = nullptr;
+            const long n = std::strtol(v, &end, 10);
+            if (*end != '\0' || (n != 0 && n != 2 && n != 3)) {
+                err = "MAYA_GLM_WIN_SCRATCH_ROWS must be 0 (off), 2 or 3";
+                return false;
+            }
+            window_rows = (int) n;
+        }
+        {
+            const int grouped_rows = glmfast::group_experts_on() && rows_ != nullptr
+                ? std::min(rows_max(), n_parts_ > 1 ? split_rows_setting() : seq_count()) : 0;
+            const int R = std::max(grouped_rows, window_rows);
             if (R >= 2) {
                 const size_t extra = (size_t) (R - 1) * 8 * sstride;
                 std::vector<unsigned long long> sp((size_t) R * 8);
@@ -1056,18 +1070,25 @@ bool Glm5Model::fast_setup(std::string& err) {
                 }
                 for (size_t i = 0; i < sp.size(); ++i)
                     sp[i] = (unsigned long long) (i < 8 ? F->scratch + i * sstride : F->rows_scratch + (i - 8) * sstride);
-                cudaMemcpy(F->rows_scr, sp.data(), sp.size() * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+                if (!glmfast::cuda_ok(cudaMemcpy(F->rows_scr, sp.data(), sp.size() * sizeof(unsigned long long),
+                                                cudaMemcpyHostToDevice), "glm row scratch pointers", err)) return false;
                 F->scratch_bytes += extra;
                 size_t f0 = 0, f1 = 0, tot = 0;
                 cudaMemGetInfo(&f0, &tot);
                 if (!win_alloc(kWinMax, err)) return false;
                 cudaMemGetInfo(&f1, &tot);
                 F->win_bytes += f0 > f1 ? f0 - f1 : 0;
-                cpu_win_alloc(F, g, exl3_);   // the merged CPU lane's rows (win_cpu_merged)
+                if (grouped_rows >= 2) cpu_win_alloc(F, g, exl3_);   // preserve the existing CPU grouping policy
                 F->rows_group = R;
-                std::fprintf(stderr, "glm fast: CUDA%d grouped rows' experts (STRATA_GLM_GROUP_EXPERTS): up to %d rows, "
+                F->win_scratch_rows = window_rows;
+                if (grouped_rows >= 2)
+                    std::fprintf(stderr, "glm fast: CUDA%d grouped rows' experts (STRATA_GLM_GROUP_EXPERTS): up to %d rows, "
                              "%.0f MB of scratch slots and %.0f MB of route state\n", dev_, R, (double) extra / 1e6,
                              (double) (f0 > f1 ? f0 - f1 : 0) / 1e6);
+                if (window_rows > 0)
+                    std::fprintf(stderr, "glm window scratch: CUDA%d configured for up to %d rows, %d allocated rows, "
+                                         "%.1f MiB extra scratch (eight private slots per row)\n",
+                                 dev_, window_rows, R, (double) extra / 1048576.0);
             }
         }
         // a parallel split load: the parts pin their prompt paths, size their pools and plan their RAM tiers one at a
