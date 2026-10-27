@@ -306,3 +306,129 @@ check weight integrity, not equivalence of model outputs. No claim is made that
 restored after testing; the experimental configuration is retained in
 `/home/caterpillar/Agent/maya-analysis-20261027/runs/codex-copycost-5200-20261027/cost020.json`.
 Raw logs, helper session summaries, and `comparison.json` are in the same folder.
+
+
+## Additional code and launch review
+
+- **Calibration transport differs from decode transport.** `fast_cpu_setup`
+  measures `cpu_p_ms` using `cudaMemcpyAsync`, while decode's `moe_fetch_kernel`
+  reads host-mapped memory with GPU threads. The value is a useful initial
+  estimate, but a calibrated copy-engine time does not establish the marginal
+  cost of a routed SM fetch. A future automatic scheduler should measure the
+  actual routed transfer path for several miss counts, and remote service time
+  for both standalone and already-active helper requests.
+- **Remote CPU summary is a residual timing.** The helper starts CPU gate/up,
+  runs its GPU share, then times `cpu_finish`. The shutdown `ms_cpu` field is
+  time past the GPU share, not isolated whole CPU expert execution. Dividing it
+  by expert count would not produce the calibration sought above.
+- **Layer cache floors also protect borrowed storage.** The floor includes
+  selected experts, spare slots and a tail borrowed by prefill/vision, plus
+  up to 16 extra slots. Reducing it without respecting the borrowed tail can
+  change more than decode capacity. A placement experiment should preserve
+  these hard requirements and use residual miss cost after helper ownership,
+  rather than only the raw popularity profile.
+- **Home launch defaults disagree with the live helper.** On the helper PC,
+  `~/fn-bin/helperd-run.sh` still asks for 86 GiB at port 18801, while the live
+  six-thread helper explicitly uses 54 GiB on a 64 GB machine. Both helper
+  systemd units are disabled/inactive. The main `start-maya.sh` auto-selection
+  checks those units, so it selects the non-network configuration even when
+  the two manually launched helpers are running. All benchmarks explicitly
+  set `MAYA_NET=1`, so these launch issues do not explain the measured decode
+  rates. They do explain why a manual/default restart can lose the intended
+  setup. No systemd units were enabled as part of the performance experiments.
+
+
+## Follow-up cost sweep at six threads / DDR5-5200
+
+`codex-copycost-sweep5200-20261027` repeats the previous candidate and compares
+0.20, 0.16 and 0.12 ms remote-expert cost assumptions. The same cc80982 binary,
+profile, standalone/shared trip assumptions (0.35/0.10 ms), and unchanged
+qshort harness are used, with two passes per arm.
+
+| Remote cost assumption | Chat tok/s | Code tok/s | Chat fetches/token | Code fetches/token |
+|---|---:|---:|---:|---:|
+| 0.20 ms | 35.5 / 35.8 | 31.5 / 31.4 | 40.20 | 52.70 |
+| 0.16 ms | 36.2 / 36.6 | 31.7 / 31.6 | 35.45 | 49.35 |
+| 0.12 ms | 36.2 / 36.2 | 31.4 / 31.4 | 34.10 | 46.25 |
+
+0.16 is selected for the subsequent fetch-launch experiment. Relative to 0.20,
+its average chat rate is +2.1%, code +0.6%, and code fetch count -6.4%. These
+small throughput differences need the same variation caveat as prior runs;
+they do not establish a universal optimum. Lowering the assumption further to
+0.12 reduces traffic but does not improve completion time in either code pass.
+
+The scheduling choice is discrete: with two available copies and no existing
+request, the model compares 2*0.256 = 0.512 ms on the main path with
+0.35+0.16 = 0.510 ms for sending one expert. A very small estimated benefit can
+therefore create a new helper request. Copy routes rose from roughly 43k at
+0.20 to 61k at 0.16 per two-pass run. This motivates measuring actual marginal
+request costs or adding a measured dispatch margin, rather than continuing to
+lower one global constant blindly.
+
+All remote copy hashes matched at shutdown. The original server was restored
+before beginning the separately controlled fetch-launch experiment.
+
+
+## Host-mapped fetch launch-size experiment
+
+Commit `2fb1fbc` adds optional `MAYA_GLM_FETCH_BLOCKS` (1..4096). With the
+variable unset, the original one-block-per-SM launch is preserved. Expert
+selection, copied bytes and the math/reduction kernels are unchanged. Full
+CUDA build passed; both the local and deployed binary SHA-256 are
+`93fa19c3168a76d6c4a5bfdd9ece75bc4a7e8c7ab3dc2e035e73f18cbba47ec8`.
+
+Run `codex-fetch-blocks-20261027` holds the remote cost at 0.16 ms and compares
+default launch size, 64 blocks and 512 blocks, two unchanged qshort passes each.
+The override log is checked for both experimental arms. Profiling is off.
+
+| Fetch launch | Chat tok/s | Code tok/s | Mean code fetches/token |
+|---|---|---|---:|
+| Default | 36.1 / 36.7 | 31.7 / 31.6 | 49.20 |
+| 64 blocks | 36.4 / 36.7 | 31.8 / 31.9 | 48.45 |
+| 512 blocks | 36.2 / 36.7 | 31.7 / 31.7 | 49.20 |
+
+The 64-block mean code gain is only 0.6%, accompanied by 1.5% fewer fetches
+from a different generated/cache trajectory; it is not isolated launch-size
+benefit. Default and 512 have the same aggregate fetch counts and helper-route
+counts, with almost identical speed. All copies matched their hashes at shutdown
+(3857/3857, 3862/3862, 3857/3857). **Keep the default launch**; the option remains
+an opt-in diagnostic and the deployed selected configuration uses the previously
+tested cc80982 binary, not this experimental build.
+
+During actual generation, nvidia-smi reported the 5090 at PCIe generation 5 x16,
+2880 MHz SM clock, 13801 MHz memory clock, 216 W and 53 C. The PRO 4000 link was
+generation 4 x4. This rules out an accidentally negotiated low generation/width
+in that sample, not PCIe bandwidth as a bottleneck.
+
+## Selected home configuration and restart path
+
+The selected configuration is demand-ranked RAM copies plus copy-aware routing,
+remote cost 0.16 ms, trip/shared-trip 0.35/0.10 ms, six CPU-helper threads and
+54 GiB helper RAM. Fetch launch sizing remains default. It trades a small
+additional throughput gain and lower main-engine CPU use against more remote
+requests; 0.16 is a measured candidate, not a general calibrated optimum.
+
+New separate files on the main home PC:
+
+- `~/fn/maya-config/iq4-kohane5200.json`
+- `~/fn/start-maya-kohane5200.sh`
+- API log: `~/src/maya-kohane5200-run.log`
+- Engine log: `~/src/project-maya/maya-iq4-kohane5200.log`
+
+The new launcher refuses to start a duplicate :18100 server, reuses exactly
+matching existing helper processes, and starts missing helpers explicitly with
+the tested binaries, GPU assignments and 54 GiB/six-thread CPU settings. It does
+not depend on the disabled systemd units or the obsolete 86 GiB wrapper. Different
+existing helper configurations are left untouched and reported instead of being
+terminated. Available RAM is checked before starting a missing CPU helper. Shell
+and embedded Python syntax checks passed, and the running-helper reuse path was
+executed successfully. A full reboot/missing-helper startup was not tested here.
+The new launcher is manual; no boot services were enabled.
+
+The original `start-maya.sh` and `iq4-prod-net.json` remain unchanged. To revert,
+stop the known tuned Maya process group and run `MAYA_NET=1 ~/fn/start-maya.sh`.
+The activation controller records the selected server group and request check in
+`~/fn/codex-activate-kohane5200-20261027/status.json` and rolls back automatically
+if startup or the arithmetic smoke check fails. Local copies of the config,
+launcher, experiment supervisors and raw results are retained in the analysis
+directory. The tiny smoke request is a wiring check, not a broad quality eval.
