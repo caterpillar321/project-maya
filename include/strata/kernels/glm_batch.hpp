@@ -146,5 +146,9 @@ void moe_combine_add(const float* out, int base, int lo, int hi, const int* pos,
                      float* ffn, cudaStream_t s);
 void moe_combine(const float* out, const int* pos, const float* w, const float* sh, int T, int k, int n_embd,
                  float* ffn, cudaStream_t s);
+/// out[g] = sum over j in [gofs[g], gofs[g+1]) of gw[j] * rows[grow[j]] (j in order): a net helper's prompt rows as
+/// each token's weighted sum (maya-helperd kTokRows through MMQ), n_groups x n_embd floats.
+void rows_group_sum(const float* rows, const int* gofs, const int* grow, const float* gw, int n_groups, int n_embd,
+                    float* out, cudaStream_t s);
 
 }  // namespace strata::kernels::glmb

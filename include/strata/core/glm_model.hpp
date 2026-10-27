@@ -136,6 +136,8 @@ public:
         double pool_gb = 0, ram_gb = 0;
     };
     FastStats fast_stats() const;
+    /// STRATA_GLM_PROF: print the stage profile of the tokens since the last call (a request's) and start over
+    void fast_prof_flush();
     /// What a part holds on its GPU, in bytes (generate's VRAM lines, the Monitor's map of a GPU): the device's total
     /// and free memory now, its PCI address (the server finds the GPU NVML numbers by it), the dense weights, the
     /// sequence state (the DSA latent cache, KDA states, indexer keys; kv_ram: KV streaming's pinned copy in RAM), the
@@ -595,6 +597,8 @@ public:
     void fast_read_expert_x3(int il, int e, uint8_t* blob);   // a whole EXL3 expert in as few reads as it allows
     void fast_ahead_route(int il, const int* ids, unsigned int miss, const short (*ahead)[8]);   // LOOKAHEAD
     void fast_ahead_reader();
+    void drop_preload_worker();    // STRATA_GLM_DROP_PRELOAD: a prompt's dropped experts, disk -> returned VRAM slots
+    void drop_preload_quiesce();   // ... stopped before the pool lends again
     bool fast_boundary(std::string& err);                  // between tokens: apply finished promotions
     int fast_sample(strata::kernels::SamplerParams& sp, std::string& err);   // this half's logits, sampled on its stream
     int fast_sample_verify(strata::kernels::SamplerParams& sp, std::string& err);   // speculative sampling's verify

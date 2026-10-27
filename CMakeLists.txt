@@ -382,12 +382,23 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # already links `strata_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
+  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp src/core/net_helper.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/glm_model.cu src/core/glm_fast_path.cu src/core/glm_prefill.cu src/core/glm_multi.cu src/core/glm_rows.cu
     src/core/glm_window.cu src/core/glm_dflash.cu src/core/glm_mtp.cu)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
+  if(STRATA_ENABLE_CUDA)
+    # the decode MLA attention: the all-heads kernel and the former ones against FP64, and their times (needs a GPU;
+    # built on request: cmake --build <dir> --target glm_mla_decode_test)
+    add_executable(glm_mla_decode_test EXCLUDE_FROM_ALL tests/glm_mla_decode_test.cu)
+    target_include_directories(glm_mla_decode_test PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(glm_mla_decode_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    # the decode indexer: the faster score / select against the former, bit for bit, and their times (on request)
+    add_executable(glm_dsa_select_test EXCLUDE_FROM_ALL tests/glm_dsa_select_test.cu)
+    target_include_directories(glm_dsa_select_test PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(glm_dsa_select_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  endif()
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)
     # the DFlash2 drafter against a CPU float forward of the same GGUF (glm_dflash_test <draft.gguf>; needs a GPU)
     # the fast path's multi-column GEMV: every column against the single-column call, and its time (needs a GPU)
@@ -435,6 +446,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(tune_hipblaslt PRIVATE hip::host roc::hipblas roc::hipblaslt)
   endif()
 
+  add_executable(maya-helperd src/program/helperd.cpp)
+  target_include_directories(maya-helperd PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(maya-helperd PRIVATE strata_engine ${_strata_gpu_runtime_target})
   add_executable(maya src/program/generate.cpp)
   target_include_directories(maya PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(maya PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})

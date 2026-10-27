@@ -37,6 +37,28 @@ public:
     bool compute(int gu_type, int d_type, size_t down_off, float limit, int ne,
                  const int* keys, const float* weights, const float* x,
                  float* out, std::string& err);
+    /// compute() in two halves: the launches (out is written by the stream), then the wait - the caller works between
+    bool compute_begin(int gu_type, int d_type, size_t down_off, float limit, int ne,
+                       const int* keys, const float* weights, const float* x,
+                       float* out, std::string& err);
+    bool compute_finish(std::string& err);
+    /// compute() from x's q8_1 blocks (n_embd / 32 of them, as quantize_q8_1 makes them) instead of x
+    bool compute_q8(int gu_type, int d_type, size_t down_off, float limit, int ne, const int* keys,
+                    const float* weights, const void* xq, float* out, std::string& err);
+    /// A prompt's rows (maya-helperd kRows): row r is expert keys[r] on token tok[r] of x (n_tok x n_embd floats),
+    /// unweighted, into out (n_rows x n_embd floats).  One upload, the rows' kernels back to back, one download - the
+    /// same kernels and arithmetic as compute() with one expert of weight 1.
+    bool compute_rows(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x, int n_rows,
+                      const int* keys, const int* tok, float* out, std::string& err);
+    /// Tokens' weighted sums: group g is token tok[g] of x with ne[g] (<= 8) experts keys[8 g ..] at weights w[8 g ..],
+    /// its sum into out row g (n_groups x n_embd floats) - compute()'s kernels, one upload/download for all of them.
+    bool compute_tok(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x, int n_groups,
+                     const int* tok, const int* ne, const int* keys, const float* w, float* out, std::string& err);
+    /// compute_tok's sums through the prompt path's MMQ kernels (10-27): the groups' rows sorted by expert, each expert
+    /// read once for all its rows (compute_tok reads it once per row), then each token's weighted sum.  q8_1 activations
+    /// as in the trunk's own prompt path; the same answer up to that rounding.
+    bool compute_tok_mmq(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x, int n_groups,
+                         const int* tok, const int* ne, const int* keys, const float* w, float* out, std::string& err);
     void close();
     int device() const { return device_; }
 
@@ -55,6 +77,19 @@ private:
     float *x_ = nullptr, *out_ = nullptr;
     void *xq_ = nullptr, *hq_ = nullptr;
     strata::kernels::glmf::MoeDev plan_;
+    float *rx_ = nullptr, *rout_ = nullptr, *rone_ = nullptr;   // compute_rows' device buffers (grown on demand)
+    unsigned long long* rptr_ = nullptr;
+    float* rw_ = nullptr;
+    size_t rx_n_ = 0, rrows_n_ = 0, rents_n_ = 0;
+    bool rows_room(size_t rows, size_t ents, std::string& err);
+    // compute_tok_mmq's device buffers (grown on demand) and its MMQ launch context
+    void* mq_ = nullptr;
+    int *mrt_ = nullptr, *mbnd_ = nullptr, *miota_ = nullptr, *mgofs_ = nullptr, *mgrow_ = nullptr;
+    float *mgw_ = nullptr, *mgu_ = nullptr, *mout_ = nullptr;
+    void *mxq_ = nullptr, *mhq_ = nullptr;
+    size_t m_rows_n_ = 0, m_groups_n_ = 0, m_bnd_n_ = 0, m_xq_n_ = 0, m_hq_n_ = 0;
+    bool compute_begin_x(int gu_type, int d_type, size_t down_off, float limit, int ne, const int* keys,
+                         const float* weights, const float* x, const void* xq_host, float* out, std::string& err);
 };
 
 /// A static, profile-filled expert tier on another CUDA device. CUDA0 keeps all

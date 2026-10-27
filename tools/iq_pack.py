@@ -429,11 +429,13 @@ def main() -> int:
     for l in moe_layers:
         ts = [T["blk.%d.ffn_%s_exps.weight" % (l, r)] for r in ROLES]
         per = [t.expected_bytes() // n_expert for t in ts]
-        if per[0] != per[1] or ts[0].type_name != ts[1].type_name:
-            print("layer %d: gate and up differ in type" % l)
-            return 1
+        # gate and up in two types (bartowski's IQ4_XS GLM: some layers' up in Q5_K / Q4_K): a gu code, the
+        # gate's type plus the up's in bits 8.. (the engine's gu_code.hpp); the blob is [gate | up | down] as ever
+        gu = ts[0].type_id if ts[0].type_id == ts[1].type_id else ts[0].type_id | (ts[1].type_id << 8)
+        if gu != ts[0].type_id:
+            print("layer %d: gate %s, up %s (gu code %d)" % (l, ts[0].type_name, ts[1].type_name, gu))
         blob = per[0] + per[1] + per[2]
-        layout.append((l, ts[0].type_id, ts[2].type_id, offset, blob, ts))
+        layout.append((l, gu, ts[2].type_id, offset, blob, ts))
         offset += blob * n_expert
     with open(out / "native_experts.txt", "w", encoding="utf-8", newline="\n") as fo:
         straddle = any(len({w[3] for w in (model.where[t.name] for t in ts)}) != 1

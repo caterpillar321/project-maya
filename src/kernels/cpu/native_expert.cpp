@@ -2,6 +2,7 @@
 // See the header.  Nothing here is Strata arithmetic: the activation quantizers and the row dot products are
 // ggml-cpu's, so an IQ expert computes what llama.cpp's CPU backend computes for it.
 #include "strata/kernels/cpu/native_expert.hpp"
+#include "strata/kernels/gu_code.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "strata/kernels/cpu/iq_avx512_one.hpp"
@@ -166,16 +167,24 @@ bool native_experts_available() noexcept { return true; }
 
 bool native_multi_rows_exact(int type) { return exact_rows(type) != nullptr; }
 
-bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt& f, std::string& err) {
-    if (gu_type < 0 || gu_type >= GGML_TYPE_COUNT || d_type < 0 || d_type >= GGML_TYPE_COUNT) {
-        err = "native experts: type " + std::to_string(gu_type) + "/" + std::to_string(d_type) + " is not a ggml type";
+bool native_fmt(int gu_code, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt& f, std::string& err) {
+    const int gu_type = strata::kernels::gu_gate(gu_code), up_type = strata::kernels::gu_up(gu_code);
+    if (gu_type < 0 || gu_type >= GGML_TYPE_COUNT || up_type < 0 || up_type >= GGML_TYPE_COUNT || d_type < 0 ||
+        d_type >= GGML_TYPE_COUNT) {
+        err = "native experts: type " + std::to_string(gu_code) + "/" + std::to_string(d_type) + " is not a ggml type";
         return false;
     }
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
+    const ggml_type_traits_cpu* tu = traits(up_type);
     const ggml_type_traits_cpu* td = traits(d_type);
     if (tg == nullptr || tg->vec_dot == nullptr || td == nullptr || td->vec_dot == nullptr) {
         err = "native experts: ggml-cpu has no dot product for type " + std::to_string(tg && tg->vec_dot ? d_type : gu_type);
+        return false;
+    }
+    if (tu == nullptr || tu->vec_dot == nullptr || tu->vec_dot_type != tg->vec_dot_type ||
+        n_embd % ggml_blck_size((ggml_type) up_type)) {
+        err = "native experts: the up's type " + std::to_string(up_type) + " cannot share the gate's activation";
         return false;
     }
     const ggml_type_traits_cpu* ag = traits(tg->vec_dot_type);
@@ -195,10 +204,12 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
     f.d_act = (int) td->vec_dot_type;
     f.n_embd = n_embd;
     f.n_ff = n_ff;
+    f.up_type = up_type;
     f.gu_row = ggml_row_size((ggml_type) gu_type, n_embd);
+    f.up_row = ggml_row_size((ggml_type) up_type, n_embd);
     f.d_row = ggml_row_size((ggml_type) d_type, n_ff);
     f.up_off = f.gu_row * (size_t) n_ff;
-    f.down_off = 2 * f.up_off;
+    f.down_off = f.up_off + f.up_row * (size_t) n_ff;
     f.bytes = f.down_off + f.d_row * (size_t) n_embd;
     f.act_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
     f.h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
@@ -226,7 +237,9 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     // both set (and on a CPU without AVX-512, STRATA_NO_IQ512 changes nothing).
     static const bool avx512 = cpu_avx512_ok() && std::getenv("STRATA_NO_IQ512") == nullptr;
     static const bool avx2 = cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr;   // pre-AVX2: ggml's vec_dot
-    if (nt >= 2 && iq512_supported(f.gu_type)) {   // one token: ggml-cpu is as fast or faster
+    const int ut = f.up_type >= 0 ? f.up_type : f.gu_type;
+    const size_t urow = f.up_row ? f.up_row : f.gu_row;
+    if (nt >= 2 && ut == f.gu_type && iq512_supported(f.gu_type)) {   // one token: ggml-cpu is as fast or faster
         if (avx512) {
             iq512_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
             return;
@@ -236,15 +249,15 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
             return;
         }
     }
-    const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
+    const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot, dot_u = traits(ut)->vec_dot;
     const int n = (int) f.n_embd;
     for (int r = r0; r < r1; ++r) {
         const uint8_t* gr = blob + (size_t) r * f.gu_row;
-        const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
+        const uint8_t* ur = blob + f.up_off + (size_t) r * urow;
         for (int t = 0; t < nt; ++t) {
             float g = 0.f, u = 0.f;
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
-            dot(n, &u, 0, ur, 0, act[t], 0, 1);
+            dot_u(n, &u, 0, ur, 0, act[t], 0, 1);
             ff[t][r] = (g / (1.f + std::exp(-g))) * u;
         }
     }
@@ -255,7 +268,10 @@ void native_gu_rows_split(const NativeFmt& f, const uint8_t* gate_base, const ui
                           float swiglu_limit) {
     const int n = (int) f.n_embd;
     const bool clamp = swiglu_limit != std::numeric_limits<float>::infinity();
-    if (r1 > r0) {
+    const int ut = f.up_type >= 0 ? f.up_type : f.gu_type;
+    const size_t urow = f.up_row ? f.up_row : f.gu_row;
+    const RowsFn fn_u = exact_rows_nt(ut, nt);
+    if (r1 > r0 && fn_u != nullptr) {
         if (const RowsFn fn = exact_rows_nt(f.gu_type, nt)) {
             // every gate row of the range for all tokens (each row decoded once per group of tokens), then every up
             // row, then the same epilogue as below on the same values
@@ -270,7 +286,7 @@ void native_gu_rows_split(const NativeFmt& f, const uint8_t* gate_base, const ui
                 uo[(size_t) t] = buf.data() + (size_t) (nt + t) * nr;
             }
             fn(f.gu_type, gate_base + (size_t) r0 * f.gu_row, f.gu_row, n, act, nt, go.data(), 0, nr);
-            fn(f.gu_type, up_base + (size_t) r0 * f.gu_row, f.gu_row, n, act, nt, uo.data(), 0, nr);
+            fn_u(ut, up_base + (size_t) r0 * urow, urow, n, act, nt, uo.data(), 0, nr);
             for (int t = 0; t < nt; ++t) {
                 for (int r = 0; r < nr; ++r) {
                     float g = go[(size_t) t][r], u = uo[(size_t) t][r];
@@ -284,14 +300,14 @@ void native_gu_rows_split(const NativeFmt& f, const uint8_t* gate_base, const ui
             return;
         }
     }
-    const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
+    const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot, dot_u = traits(ut)->vec_dot;
     for (int r = r0; r < r1; ++r) {
         const uint8_t* gr = gate_base + (size_t) r * f.gu_row;
-        const uint8_t* ur = up_base + (size_t) r * f.gu_row;
+        const uint8_t* ur = up_base + (size_t) r * urow;
         for (int t = 0; t < nt; ++t) {
             float g = 0.f, u = 0.f;
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
-            dot(n, &u, 0, ur, 0, act[t], 0, 1);
+            dot_u(n, &u, 0, ur, 0, act[t], 0, 1);
             if (clamp) {   // GLM's clamped swiglu (glm_ffn's semantics), matching the device path
                 g = std::fmin(g, swiglu_limit);
                 u = std::fmin(std::fmax(u, -swiglu_limit), swiglu_limit);

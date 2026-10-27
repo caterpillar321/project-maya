@@ -3,7 +3,10 @@
 // Not a public header: glm_model.cu also uses it to reset request-local routing errors.
 #pragma once
 
+#include "strata/kernels/gu_code.hpp"
+
 #include "strata/core/glm_model.hpp"
+#include "strata/core/net_helper.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/kernels/glm_kv_stream.hpp"
@@ -326,14 +329,17 @@ void read_slice(const Glm5Model::Shard& sh, uint64_t off, size_t len, uint8_t* d
 // A layer's VRAM slot stride: the expert blob ([gate | up | down]) rounded up so that both matrices' block sizes and
 // 16 bytes divide it - llama.cpp's MMQ addresses expert e of a pool partition as base + e * stride in WHOLE blocks,
 // so the prompt path multiplies the resident experts where they lie.
-inline size_t expert_stride(size_t blob, int gu_type, int d_type) {
+inline size_t expert_stride(size_t blob, int gu_type, int d_type) {   // (gu_type: a gu_code)
     // an EXL3 blob: every piece is a multiple of 256 bytes, no ggml blocks to keep whole (the prompt path does not
     // multiply these with MMQ)
     if (gu_type == strata::kernels::exl3::kTypeEXL3 || d_type == strata::kernels::exl3::kTypeEXL3)
         return (blob + 255) / 256 * 256;
     size_t a = 16;
-    const size_t b1 = ggml_type_size((ggml_type) gu_type), b2 = ggml_type_size((ggml_type) d_type);
+    const size_t b1 = ggml_type_size((ggml_type) strata::kernels::gu_gate(gu_type)),
+                 b3 = ggml_type_size((ggml_type) strata::kernels::gu_up(gu_type)),
+                 b2 = ggml_type_size((ggml_type) d_type);
     if (b1 > 0) a = std::lcm(a, b1);
+    if (b3 > 0) a = std::lcm(a, b3);
     if (b2 > 0) a = std::lcm(a, b2);
     return (blob + a - 1) / a * a;
 }
@@ -410,6 +416,14 @@ struct Glm5Model::FastState {
     std::vector<std::thread> ah_th;
     bool ah_quit = false;
     std::atomic<int> ah_inflight{0};
+    uint64_t diag_refill = 0;
+    // STRATA_GLM_NET_TRACE: the device's per-route times (gf::MoeDev::tlog) and the service thread's per route
+    unsigned long long* tlog_h = nullptr;
+    struct HostT {
+        unsigned int seq = 0, flags = 0;   // flags: 1 net helper 0, 2 net helper 1, 4 local helper, 8 CPU experts
+        int64_t seen = 0, beg = 0, sent = 0, loc = 0, cpu = 0, fin0 = 0, fin1 = 0, pub = 0;   // steady ns
+    };
+    std::vector<HostT> htlog;   // RAM REFILL reads queued (fast_boundary (4b))
     // per RAM class and slot, for kRLoad slots: tag << 2 | phase (0 queued, 1 reading, 2 landed) - a job reads only while
     // the tag it carries is current (a slot freed and reused under it gets a new tag)
     std::vector<std::unique_ptr<std::atomic<uint64_t>[]>> rload;
@@ -485,8 +499,9 @@ struct Glm5Model::FastState {
         const float* router_bias = nullptr;
         WSlot sh_gate, sh_up, sh_down;
         WSlot ffn_gate, ffn_up, ffn_down;
-        int gu_type = 0, d_type = 0;
+        int gu_type = 0, d_type = 0;   // gu_type: a gu_code (gate and up may differ)
         size_t blob = 0, down_off = 0, gu_bytes = 0, dn_bytes = 0;
+        size_t up_bytes = 0;           // the up's bytes (gu_bytes: the gate's); down_off = gu_bytes + up_bytes
         // EXL3 (an exl3.txt pack): the routed experts' blob layout, and the indexer's q_b when it is an EXL3 matrix
         bool exl3 = false;
         strata::kernels::exl3::ExpertLayout xl;
@@ -619,6 +634,24 @@ struct Glm5Model::FastState {
         cudaEvent_t ev;
     };
     std::vector<BgMove> bg;
+    // DROP PRELOAD (STRATA_GLM_DROP_PRELOAD, 10-27): the experts a prompt's lending dropped (no RAM slot for them)
+    // are read back from the disk into the returned tail slots, most used first, by their own thread and stream
+    std::vector<int> drop_keys;                // lend_tail: the keys it dropped to the disk
+    struct PreJob { int il, e, vslot; uint8_t* dst; };
+    struct PreDone { int il, e, vslot; cudaEvent_t ev; };
+    std::mutex pre_mu;
+    std::condition_variable pre_cv;
+    std::vector<PreJob> pre_q;                 // claimed slots (kLanding) waiting for the reader
+    std::vector<PreDone> pre_done;             // copies issued; fast_boundary makes them resident
+    std::thread pre_th;
+    bool pre_quit = false;
+    int pre_busy = 0;                          // jobs the reader holds right now
+    cudaStream_t pre_st = nullptr;
+    uint8_t* pre_buf[2] = {nullptr, nullptr};
+    cudaEvent_t pre_bev[2] = {nullptr, nullptr};
+    uint64_t pre_claimed = 0, pre_landed = 0, pre_discard = 0, pre_cancelled = 0;
+    bool refill_burst = false;   // STRATA_GLM_VRAM_REFILL: a prompt's loan just came back (prefill_return)
+    uint64_t burst_filled = 0;   // ... promotions issued since then (the log line when it ends)
     bool bg_hold = false;   // lend_tail: no new moves while the pool's tail is lent
     volatile int* route_error_h = nullptr;   // in the mapped ring allocation, visible after compute completion
     uint64_t bg_up = 0, bg_down = 0;
@@ -628,6 +661,14 @@ struct Glm5Model::FastState {
     int* upd_key_d = nullptr;
     unsigned long long* upd_val_d = nullptr;
     static constexpr int kMaxUpd = 8192;
+    // STRATA_GLM_WIN_SPARES=1 (10-27, default off): a verify window's mid-window spare top-up (glm_win_spares) - per layer a
+    // pinned / device staging region of kWsUpd table edits, and its counters
+    static constexpr int kWsUpd = 32;
+    int* ws_key_h = nullptr;
+    unsigned long long* ws_val_h = nullptr;
+    int* ws_key_d = nullptr;
+    unsigned long long* ws_val_d = nullptr;
+    uint64_t ws_calls = 0, ws_spares = 0, ws_drains = 0;
     // a batch holds each table key ONCE (its last value): the update kernel writes the batch in parallel, so a key
     // edited twice in one boundary (made live, then freed as the coldest) had no defined winner
     std::vector<int> upd_at;          // table key -> its index in the current batch, valid when upd_gen[key] == upd_g
@@ -649,6 +690,25 @@ struct Glm5Model::FastState {
     //      A split of 3+ GPUs shares one pool across its parts (fast_cpu_lane_setup).
     std::shared_ptr<glmfast::Workers> cpu_pool;
     GlmExpertHelper helper;   // opt-in, independent expert ownership on the secondary GPU
+    // STRATA_GLM_NET_HELPER=host:port[,..]: maya-helperd GPUs on other machines, a static share each (beside the
+    // local helper); net_of[key] is 1 + the index of the one that holds the expert, 0 none
+    std::vector<std::unique_ptr<GlmNetHelper>> net;
+    std::vector<uint8_t> net_of;
+    // the copy share (STRATA_GLM_NET_COPY): copy_of[key] != 0 - net helper copy_j (1-based) holds a copy of this trunk
+    // RAM-tier expert (the trunk keeps its own, net_of stays 0); copy_r[k][c][s]: of a route's k CPU-lane experts, c of
+    // them with a copy, how many go there (s: the route asks that helper anyway).  copy_refs / copy_hash: the check
+    std::vector<uint8_t> copy_of;
+    int copy_j = 0;
+    uint8_t copy_r[9][9][2] = {};
+    std::vector<strata::core::netproto::HashRef> copy_refs;
+    std::vector<uint64_t> copy_hash;
+    std::atomic<uint64_t> copy_sent{0}, copy_routes{0}, copy_kept{0};
+    bool aux_owns(int key) const { return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0); }
+    std::vector<uint8_t> owned_all() const {   // what the primary router leaves to the helpers
+        std::vector<uint8_t> o = helper.owners();
+        for (size_t k = 0; k < o.size() && k < net_of.size(); ++k) o[k] |= net_of[k] != 0;
+        return o;
+    }
     uint8_t* helper_owned_d = nullptr;   // primary router excludes these experts from PCIe admission/prefetch
     uint64_t helper_swaps = 0;
     std::atomic<bool> helper_failed{false};
@@ -919,5 +979,8 @@ inline const int* kv_attend_cells(const Glm5Model::KvStream* K, int il, uint16_t
     return slot_cells;
 }
 
+
+// STRATA_GLM_WIN_SPARES: before layer il's MoE in a verify window - its landed demotions and empty spares (glm_fast_path.cu)
+bool glm_win_spares(Glm5Model::FastState* F, int il, std::string& err);
 
 }  // namespace strata::core

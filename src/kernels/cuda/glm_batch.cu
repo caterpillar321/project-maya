@@ -1903,6 +1903,19 @@ __global__ void swiglu_f16_kernel(const float* __restrict__ gate, const float* _
     h[i] = __float2half((g / (1.0f + expf(-g))) * u);
 }
 
+// out[g] = sum of gw[j] * rows[grow[j]] over g's entries, in order (rows_group_sum)
+__global__ void rows_group_sum_kernel(const float* __restrict__ rows, const int* __restrict__ gofs,
+                                      const int* __restrict__ grow, const float* __restrict__ gw, int E,
+                                      float* __restrict__ out) {
+    const int g = blockIdx.x;
+    const int a = gofs[g], b = gofs[g + 1];
+    for (int e = threadIdx.x; e < E; e += blockDim.x) {
+        float m = 0.0f;
+        for (int j = a; j < b; ++j) m += gw[j] * rows[(size_t) grow[j] * E + e];
+        out[(size_t) g * E + e] = m;
+    }
+}
+
 // ffn[t] += sum over t's routes j whose sorted row is in [lo, hi) of w[j] * out[row - base] (in route order)
 __global__ void moe_combine_add_kernel(const float* __restrict__ out, int base, int lo, int hi,
                                        const int* __restrict__ pos, const float* __restrict__ w, int k, int E,
@@ -2389,6 +2402,12 @@ void swiglu_f16(const float* gate, const float* up, void* h16, int64_t n, float 
     if (n <= 0) return;
     swiglu_f16_kernel<<<nblk(n), 256, 0, s>>>(gate, up, (__half*) h16, n, limit);
     check("swiglu_f16");
+}
+
+void rows_group_sum(const float* rows, const int* gofs, const int* grow, const float* gw, int n_groups, int n_embd,
+                    float* out, cudaStream_t s) {
+    if (n_groups <= 0) return;
+    rows_group_sum_kernel<<<n_groups, 256, 0, s>>>(rows, gofs, grow, gw, n_embd, out);
 }
 
 void moe_combine_add(const float* out, int base, int lo, int hi, const int* pos, const float* w, int T, int k, int n_embd,

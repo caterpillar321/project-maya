@@ -273,6 +273,13 @@ static const char* const kMtpF32[] = {"attn_norm.weight", "ffn_norm.weight", "at
                                       "indexer_compressor_ape.weight", "exp_probs_b.bias", "nextn.enorm.weight",
                                       "nextn.hnorm.weight", "nextn.shared_head_norm.weight"};
 
+// A draft block's raw (natively served) matrix in a type the MMVQ kernels lack - bartowski's GLM-5.3-Flash
+// BF16-IQ4_XS keeps blk.45's attn_kv_a_mqa in BF16 - is quantized to Q8_0 at load (a draft's weights: its acceptance
+// is what they change, not the target's output)
+static int mtp_raw_type(const strata::TensorInfo* t) {
+    return strata::kernels::native_mmvq_supported((int) t->type) ? (int) t->type : 8;
+}
+
 // ... and the VRAM they take
 static bool mtp_dense_vram(const std::function<const strata::TensorInfo*(const std::string&)>& find, int il,
                            uint64_t& bytes, std::string& err) {
@@ -281,8 +288,8 @@ static bool mtp_dense_vram(const std::function<const strata::TensorInfo*(const s
     for (const char* n : kMtpRaw) {
         const strata::TensorInfo* t = find(P + n);
         if (t == nullptr) { err = "mtp: " + P + n + " missing"; return false; }
-        bytes += (strata::kernels::native_mmvq_weight_bytes(t->type, (int) t->shape[0], (int) t->shape[1]) + 255u) &
-                 ~(uint64_t) 255u;
+        bytes += (strata::kernels::native_mmvq_weight_bytes(mtp_raw_type(t), (int) t->shape[0], (int) t->shape[1]) +
+                  255u) & ~(uint64_t) 255u;
     }
     for (const char* n : kMtpB16) {
         const strata::TensorInfo* t = find(P + n);
@@ -2472,7 +2479,8 @@ cudaError_t strata::core::Glm5Model::pack_moe_tail(std::string& err, const std::
         const Shard& us = pack_shards_[(size_t) nl.up_shard];
         const Shard& ds = pack_shards_[(size_t) nl.down_shard];
         const uint8_t* gb = gs.base + nl.gate_off + (uint64_t) e * nl.fmt.gu_row * (uint64_t) g.n_ff_exp;
-        const uint8_t* ub = us.base + nl.up_off + (uint64_t) e * nl.fmt.gu_row * (uint64_t) g.n_ff_exp;
+        const uint8_t* ub = us.base + nl.up_off + (uint64_t) e * (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row) *
+                                                 (uint64_t) g.n_ff_exp;
         const uint8_t* db = ds.base + nl.down_off + (uint64_t) e * nl.fmt.d_row * (uint64_t) g.n_embd;
         strata::kernels::cpu::native_quant_act(nl.fmt, host_x_.data(), host_act_.data());
         strata::kernels::cpu::native_gu_rows_split(nl.fmt, gb, ub, act, 1, ff1, 0, (int) g.n_ff_exp, g.swiglu_exp);
@@ -2544,7 +2552,8 @@ int32_t strata::core::Glm5Model::pool_evict(int cls) {
 
 void strata::core::Glm5Model::pool_ensure(int layer, const int* ids, int k) {
     const auto& nl = pack_layers_[(size_t) layer];
-    const uint64_t gu_bytes = (uint64_t) nl.fmt.gu_row * (uint64_t) g_.n_ff_exp;   // one role
+    const uint64_t gu_bytes = (uint64_t) nl.fmt.gu_row * (uint64_t) g_.n_ff_exp;   // the gate
+    const uint64_t up_bytes = (uint64_t) (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row) * (uint64_t) g_.n_ff_exp;
     const uint64_t dn_bytes = (uint64_t) nl.fmt.d_row * (uint64_t) g_.n_embd;
     const Shard& gs = pack_shards_[(size_t) nl.gate_shard];
     const Shard& us = pack_shards_[(size_t) nl.up_shard];
@@ -2580,8 +2589,8 @@ void strata::core::Glm5Model::pool_ensure(int layer, const int* ids, int k) {
                 StageJob j;
                 j.src[0] = gs.base + nl.gate_off + (uint64_t) ids[i] * gu_bytes;
                 j.len[0] = gu_bytes;
-                j.src[1] = us.base + nl.up_off + (uint64_t) ids[i] * gu_bytes;
-                j.len[1] = gu_bytes;
+                j.src[1] = us.base + nl.up_off + (uint64_t) ids[i] * up_bytes;
+                j.len[1] = up_bytes;
                 j.src[2] = ds.base + nl.down_off + (uint64_t) ids[i] * dn_bytes;
                 j.len[2] = dn_bytes;
                 j.buf = stage_bufs_[(size_t) i];
@@ -2592,24 +2601,24 @@ void strata::core::Glm5Model::pool_ensure(int layer, const int* ids, int k) {
                     stage_cv_.notify_one();
                 }
                 staged_dst_[i] = dst;
-                staged_len_[i] = 2 * gu_bytes + dn_bytes;
+                staged_len_[i] = gu_bytes + up_bytes + dn_bytes;
             } else if (bounce_) {
                 // pinned staging (STRATA_GLM_BOUNCE=1): CPU into the ring, then one stream-ordered
                 // device copy per miss.  Left of the default path after two driver wedges on this
                 // host; the ring drains via the sync at the head of every pool_ensure.
                 uint8_t* b = bounce_ + (size_t) (bounce_i_++ % 24) * slot_bytes_;
                 std::memcpy(b, gs.base + nl.gate_off + (uint64_t) ids[i] * gu_bytes, gu_bytes);
-                std::memcpy(b + gu_bytes, us.base + nl.up_off + (uint64_t) ids[i] * gu_bytes, gu_bytes);
-                std::memcpy(b + 2 * gu_bytes, ds.base + nl.down_off + (uint64_t) ids[i] * dn_bytes, dn_bytes);
+                std::memcpy(b + gu_bytes, us.base + nl.up_off + (uint64_t) ids[i] * up_bytes, up_bytes);
+                std::memcpy(b + gu_bytes + up_bytes, ds.base + nl.down_off + (uint64_t) ids[i] * dn_bytes, dn_bytes);
                 cudaMemcpyAsync(dst, b, slot_bytes_, cudaMemcpyHostToDevice);
             } else {
                 // the verified phase-1 default: three stream-ordered copies out of the mmap'd
                 // shards (the roles share a shard but an expert's gate/up rows are not adjacent)
                 cudaMemcpyAsync(dst, gs.base + nl.gate_off + (uint64_t) ids[i] * gu_bytes, gu_bytes,
                                 cudaMemcpyHostToDevice);
-                cudaMemcpyAsync(dst + gu_bytes, us.base + nl.up_off + (uint64_t) ids[i] * gu_bytes, gu_bytes,
+                cudaMemcpyAsync(dst + gu_bytes, us.base + nl.up_off + (uint64_t) ids[i] * up_bytes, up_bytes,
                                 cudaMemcpyHostToDevice);
-                cudaMemcpyAsync(dst + 2 * gu_bytes, ds.base + nl.down_off + (uint64_t) ids[i] * dn_bytes, dn_bytes,
+                cudaMemcpyAsync(dst + gu_bytes + up_bytes, ds.base + nl.down_off + (uint64_t) ids[i] * dn_bytes, dn_bytes,
                                 cudaMemcpyHostToDevice);
             }
             ++pool_misses_;
@@ -2681,6 +2690,7 @@ bool strata::core::Glm5Model::pack_moe_tail_device(std::string& err, const std::
                 return va > vb;
             });
             const uint64_t gu_b = (uint64_t) nl.fmt.gu_row * (uint64_t) g.n_ff_exp;
+            const uint64_t up_b = (uint64_t) (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row) * (uint64_t) g.n_ff_exp;
             const uint64_t dn_b = (uint64_t) nl.fmt.d_row * (uint64_t) g.n_embd;
             const Shard& s1 = pack_shards_[(size_t) nl.gate_shard];
             const Shard& s2 = pack_shards_[(size_t) nl.up_shard];
@@ -2692,7 +2702,7 @@ bool strata::core::Glm5Model::pack_moe_tail_device(std::string& err, const std::
                     posix_fadvise(s1.fd, (off_t) (nl.gate_off + (uint64_t) e2 * gu_b), (off_t) gu_b,
                                   POSIX_FADV_WILLNEED);
                 if (s2.fd >= 0)
-                    posix_fadvise(s2.fd, (off_t) (nl.up_off + (uint64_t) e2 * gu_b), (off_t) gu_b,
+                    posix_fadvise(s2.fd, (off_t) (nl.up_off + (uint64_t) e2 * up_b), (off_t) up_b,
                                   POSIX_FADV_WILLNEED);
                 if (s3.fd >= 0)
                     posix_fadvise(s3.fd, (off_t) (nl.down_off + (uint64_t) e2 * dn_b), (off_t) dn_b,
@@ -2703,7 +2713,7 @@ bool strata::core::Glm5Model::pack_moe_tail_device(std::string& err, const std::
 #endif
     strata::kernels::quantize_q8_1_rows(A + sc_x, 1, g.n_embd, dev_xq_, nullptr);
     const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout(
-        nl.fmt.gu_type, nl.fmt.d_type, g.n_embd, g.n_ff_exp);
+        strata::kernels::gu_code(nl.fmt.gu_type, nl.fmt.up_type), nl.fmt.d_type, g.n_embd, g.n_ff_exp);
     strata::kernels::native_expert_grouped(L, (const unsigned long long*) (plan_dev_ + offsetof(DevPlan, ptr)),
                                            (const int32_t*) (plan_dev_ + offsetof(DevPlan, start)),
                                            (const int32_t*) (plan_dev_ + offsetof(DevPlan, n_groups)),
@@ -2920,7 +2930,8 @@ bool strata::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max
             const char* role_tn[3] = {"ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight"};
             const int role_sh[3] = {nl.gate_shard, nl.up_shard, nl.down_shard};
             const uint64_t role_of[3] = {nl.gate_off, nl.up_off, nl.down_off};
-            const int role_ty[3] = {gu, gu, dty};   // gate and up share one type; down is its own
+            // gate and up: one type, or two in a gu_code; down is its own
+            const int role_ty[3] = {strata::kernels::gu_gate(gu), strata::kernels::gu_up(gu), dty};
             for (int ri = 0; ri < 3; ++ri) {
                 const std::string rn = "blk." + std::to_string(layer) + "." + role_tn[ri];
                 const strata::TensorInfo* ti = gfs[(size_t) role_sh[ri]]->find(rn);
@@ -3493,10 +3504,10 @@ bool strata::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max
         size_t gu_row_max = 0, d_row_max = 0;
         for (const auto& nl : pack_layers_) {
             if (nl.layer < 0) continue;
-            gu_row_max = std::max(gu_row_max, nl.fmt.gu_row);
+            gu_row_max = std::max(gu_row_max, nl.fmt.gu_row + (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row));
             d_row_max = std::max(d_row_max, nl.fmt.d_row);
         }
-        slot_bytes_ = 2 * gu_row_max * (size_t) g_.n_ff_exp + d_row_max * (size_t) g_.n_embd;
+        slot_bytes_ = gu_row_max * (size_t) g_.n_ff_exp + d_row_max * (size_t) g_.n_embd;   // (gate + up rows)
         // SIZE CLASSES: one class per distinct (gu_row, d_row).  Uniform slots at the largest blob
         // pad ~20% of the arena (8.78 MB max vs 7.03 MB average on this pack); per-class sub-arenas
         // sized by layer-count-weighted demand recover it (~+25% slots).
@@ -3506,11 +3517,12 @@ bool strata::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max
         std::vector<int> c_layers;
         for (const auto& nl : pack_layers_) {
             if (nl.layer < 0) continue;
-            const auto key = std::make_pair(nl.fmt.gu_row, nl.fmt.d_row);
+            const size_t gu2 = nl.fmt.gu_row + (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row);
+            const auto key = std::make_pair(gu2, nl.fmt.d_row);
             auto it = class_ids.find(key);
             if (it == class_ids.end()) {
                 it = class_ids.emplace(key, (int) c_stride.size()).first;
-                c_stride.push_back(2 * nl.fmt.gu_row * (size_t) g_.n_ff_exp + nl.fmt.d_row * (size_t) g_.n_embd);
+                c_stride.push_back(gu2 * (size_t) g_.n_ff_exp + nl.fmt.d_row * (size_t) g_.n_embd);
                 c_weight.push_back(0);
                 c_layers.push_back(0);
             }
@@ -3736,9 +3748,31 @@ bool strata::core::Glm5Model::load_mtp(const std::vector<std::unique_ptr<strata:
             continue;
         }
         const strata::TensorInfo* t = find(P + n, si);
-        const size_t nb = strata::kernels::native_mmvq_weight_bytes(t->type, (int) t->shape[0], (int) t->shape[1]);
-        if (cudaMemcpy(base + at, src_of(t, si), nb, cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: upload"; return false; }
-        ws_map_[P + n] = strata::core::WSlot{nullptr, (int) t->type, (const void*) (base + at), (int64_t) t->shape[0],
+        const int wt = mtp_raw_type(t);
+        const size_t nb = strata::kernels::native_mmvq_weight_bytes(wt, (int) t->shape[0], (int) t->shape[1]);
+        if (wt == (int) t->type) {
+            if (cudaMemcpy(base + at, src_of(t, si), nb, cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: upload"; return false; }
+        } else {   // (see mtp_raw_type) to floats, then ggml's Q8_0 rows: a half scale amax / 127 and 32 rounded bytes
+            if (!to_host(t, si)) return false;
+            const int64_t k = t->shape[0], rows = t->shape[1];
+            if (k % 32 != 0 || (int64_t) host.size() != k * rows) { err = "mtp: " + P + n + " cannot be Q8_0"; return false; }
+            std::vector<uint8_t> q(nb);
+            for (int64_t r = 0; r < rows; ++r)
+                for (int64_t b = 0; b < k / 32; ++b) {
+                    const float* x = host.data() + r * k + b * 32;
+                    uint8_t* o = q.data() + (size_t) (r * (k / 32) + b) * 34;
+                    float amax = 0.0f;
+                    for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(x[j]));
+                    const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+                    const ggml_fp16_t hd = ggml_fp32_to_fp16(d);
+                    std::memcpy(o, &hd, 2);
+                    for (int j = 0; j < 32; ++j) o[2 + j] = (uint8_t) (int8_t) std::lround(x[j] * id);
+                }
+            if (cudaMemcpy(base + at, q.data(), nb, cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: upload"; return false; }
+            std::fprintf(stderr, "glm mtp: %s%s %s -> Q8_0 (%.1f MB)\n", P.c_str(), n, t->type == 30 ? "BF16" : "float",
+                         (double) nb / 1048576.0);
+        }
+        ws_map_[P + n] = strata::core::WSlot{nullptr, wt, (const void*) (base + at), (int64_t) t->shape[0],
                                              (int64_t) t->shape[1]};
         at += (nb + 255u) & ~(uint64_t) 255u;
     }

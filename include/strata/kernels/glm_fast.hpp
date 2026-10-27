@@ -173,6 +173,9 @@ void dsa_select(const float* score, int n_vis, int kpool, int top_pools, int n_s
 /// decode's paths all take it alike (dsa_select_all_on; STRATA_GLM_DSA_ALL=0: off), so a window's token is the
 /// token path's bit for bit
 bool dsa_select_all_on();
+/// The indexer's kernels (tests): 0 as the environment says (default: the former; STRATA_GLM_DSA_NEW=1: the bench-faster
+/// score / select, the same bits), 1 the former, 2 the new
+void dsa_set_path(int path);
 void dsa_select_all(int n_vis, int kpool, int n_sel, int pos, int* cells, cudaStream_t s);
 /// Absorbed MLA for one token, per head: q_abs = wk_b_h . q_h, scores over the selected latents,
 /// softmax, ctx, out_h = wv_b_h . ctx; writes the q8_1 of the n_head * v_head output.
@@ -195,6 +198,9 @@ constexpr int kMlaTokMax = 8;
 bool mla_attend_batch(const float* q_abs, int64_t q_stride, const uint16_t* lat, const int* cells, int64_t c_stride,
                       const int* n_sel, int T, int n_head, int qk_nope, int kv_lora, float* ctx, int64_t ctx_stride,
                       cudaStream_t s, bool lat_q8);
+/// The decode attention's kernels (tests): 0 as the environment says (default: every head of a token in one block;
+/// STRATA_GLM_MLA_OLD=1: the former head-group kernels), 1 the former, 2 the all-heads kernel
+void mla_set_path(int path);
 void mla_out(const float* ctx, int64_t ctx_stride, const uint16_t* wv_b, int n_head, int kv_lora, int v_head, int ncol,
              void* out_q8_1, int64_t out_stride_bytes, cudaStream_t s);
 /// The INT8 latent cache (STRATA_GLM_KV_INT8): per position kv_lora int8 codes, then one FP16 scale per 32 values
@@ -243,7 +249,13 @@ struct MoeDev {
     // strides (q8_1 blocks: its FFN input, its h, its shared expert's h; floats: its output, its CPU part)
     int mt_T = 1;
     unsigned int mt_xq_s = 0, mt_hq_s = 0, mt_sh_hq_s = 0, mt_out_s = 0, mt_cpu_s = 0;
+    // STRATA_GLM_NET_TRACE: host-mapped [kTlog][8] - per route seq: globaltimer at the route, at moe_cpu_wait's start
+    // and end, and the seq (nullptr: off)
+    unsigned long long* tlog = nullptr;
+    // the FFN input's q8_1 (n_embd / 32 blocks) the route copies into its request with x (nullptr: not)
+    const void* req_xq = nullptr;
 };
+constexpr int kTlog = 256;
 /// The CPU LANE's answer: the weighted sum of the RAM-tier experts the host computed for route `seq`.
 struct CpuAnswer {
     volatile unsigned int seq;
@@ -278,6 +290,11 @@ struct MoeRequest {
     int win_rows;                // ... a batched rows step's group instead (STRATA_GLM_GROUP_EXPERTS): win the row,
     int pad_;                    //     win_n the rows; their CPU lanes merged on this part's own pool
     float x[4096];               // the FFN input, written only when cpu_mask != 0
+    // ... and its q8_1 blocks (n_embd / 32 x 36 bytes, the trunk's own FFN-input quantization) when xq_ok: the net
+    // helpers' kCompute2 sends these instead of x (MoeDev::req_xq set; 0: not written)
+    unsigned int xq_ok;
+    unsigned int xq_pad_;
+    unsigned int xq[4096 / 32 * 9];
 };
 /// The host's answer to a request with misses.
 struct MoeResponse {

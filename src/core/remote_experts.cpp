@@ -1,4 +1,9 @@
 #include "strata/core/remote_experts.hpp"
+#include "strata/kernels/glm_batch.hpp"
+#include "strata/kernels/gu_code.hpp"
+#include "strata/prefill/moe_mmq.hpp"
+
+#include <vector>
 
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -215,6 +220,30 @@ std::vector<GlmExpertHelper::Swap> GlmExpertHelper::swaps(const std::vector<uint
 bool GlmExpertHelper::compute(int gu_type, int d_type, size_t down_off, float limit, int ne,
                               const int* keys, const float* weights, const float* x,
                               float* out, std::string& err) {
+    return compute_begin(gu_type, d_type, down_off, limit, ne, keys, weights, x, out, err) && compute_finish(err);
+}
+
+bool GlmExpertHelper::compute_finish(std::string& err) {
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    return check(cudaStreamSynchronize(stream_), "helper finish", err, device_);
+}
+
+bool GlmExpertHelper::compute_q8(int gu_type, int d_type, size_t down_off, float limit, int ne, const int* keys,
+                                 const float* weights, const void* xq, float* out, std::string& err) {
+    return compute_begin_x(gu_type, d_type, down_off, limit, ne, keys, weights, nullptr, xq, out, err) &&
+           compute_finish(err);
+}
+
+bool GlmExpertHelper::compute_begin(int gu_type, int d_type, size_t down_off, float limit, int ne,
+                                    const int* keys, const float* weights, const float* x,
+                                    float* out, std::string& err) {
+    return compute_begin_x(gu_type, d_type, down_off, limit, ne, keys, weights, x, nullptr, out, err);
+}
+
+bool GlmExpertHelper::compute_begin_x(int gu_type, int d_type, size_t down_off, float limit, int ne,
+                                      const int* keys, const float* weights, const float* x, const void* xq_host,
+                                      float* out, std::string& err) {
     namespace gf = strata::kernels::glmf;
     if (device_ < 0 || ne < 1 || ne > 8 || !gf::moe_supported(gu_type) || !gf::moe_supported(d_type)) {
         err = "GLM expert helper: unsupported expert types or route width";
@@ -229,18 +258,320 @@ bool GlmExpertHelper::compute(int gu_type, int d_type, size_t down_off, float li
     }
     DeviceScope scope(device_);
     if (!scope.ok) { err = scope.error(device_); return false; }
-    if (!check(cudaMemcpyAsync(x_, x, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, stream_),
-               "helper input", err, device_) ||
+    if (!(xq_host != nullptr
+              ? check(cudaMemcpyAsync(xq_, xq_host, (size_t) n_embd_ / 32 * 36, cudaMemcpyHostToDevice, stream_),
+                      "helper input (q8_1)", err, device_)
+              : check(cudaMemcpyAsync(x_, x, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, stream_),
+                      "helper input", err, device_)) ||
         !check(cudaMemcpyAsync(plan_.plan_ptr, ptr, (size_t) ne * sizeof(ptr[0]), cudaMemcpyHostToDevice, stream_),
                "helper pointers", err, device_) ||
         !check(cudaMemcpyAsync(plan_.plan_w, weights, (size_t) ne * sizeof(float), cudaMemcpyHostToDevice, stream_),
                "helper weights", err, device_)) return false;
-    gf::quantize_q8_1(x_, xq_, n_embd_, stream_);
+    if (xq_host == nullptr) gf::quantize_q8_1(x_, xq_, n_embd_, stream_);
     gf::moe_gate_up(gu_type, plan_, ne, n_embd_, n_ff_, limit, xq_, hq_, nullptr, 0, nullptr, 0, nullptr, stream_);
     gf::moe_down(d_type, plan_, ne, n_embd_, n_ff_, down_off, hq_, nullptr, out_, stream_);
     return check(cudaMemcpyAsync(out, out_, (size_t) n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, stream_),
-                 "helper result", err, device_) &&
-           check(cudaStreamSynchronize(stream_), "helper finish", err, device_);
+                 "helper result", err, device_);
+}
+
+// compute_rows / compute_tok's device buffers: `rows` output rows of n_embd floats, `ents` plan entries
+bool GlmExpertHelper::rows_room(size_t rows, size_t ents, std::string& err) {
+    const size_t E = (size_t) n_embd_;
+    if (rrows_n_ < rows) {
+        if (rout_) cudaFree(rout_);
+        rout_ = nullptr;
+        rrows_n_ = rows + rows / 4 + 16;
+        if (!check(cudaMalloc((void**) &rout_, rrows_n_ * E * sizeof(float)), "helper rows out", err, device_)) {
+            rrows_n_ = 0;
+            return false;
+        }
+    }
+    if (rents_n_ < ents) {
+        if (rptr_) cudaFree(rptr_);
+        if (rw_) cudaFree(rw_);
+        rptr_ = nullptr;
+        rw_ = nullptr;
+        rents_n_ = ents + ents / 4 + 64;
+        if (!check(cudaMalloc((void**) &rptr_, rents_n_ * sizeof(unsigned long long)), "helper rows ptrs", err, device_) ||
+            !check(cudaMalloc((void**) &rw_, rents_n_ * sizeof(float)), "helper rows weights", err, device_)) {
+            rents_n_ = 0;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GlmExpertHelper::compute_rows(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x,
+                                   int n_rows, const int* keys, const int* tok, float* out, std::string& err) {
+    namespace gf = strata::kernels::glmf;
+    if (device_ < 0 || n_rows < 1 || n_tok < 1 || !gf::moe_supported(gu_type) || !gf::moe_supported(d_type)) {
+        err = "GLM expert helper: unsupported expert types or rows";
+        return false;
+    }
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    const size_t E = (size_t) n_embd_;
+    if (rone_ == nullptr) {
+        const float one = 1.0f;
+        if (!check(cudaMalloc((void**) &rone_, 64), "helper rows one", err, device_) ||
+            !check(cudaMemcpy(rone_, &one, sizeof(one), cudaMemcpyHostToDevice), "helper rows one", err, device_))
+            return false;
+    }
+    if (rx_n_ < (size_t) n_tok) {
+        if (rx_) cudaFree(rx_);
+        rx_ = nullptr;
+        rx_n_ = (size_t) n_tok + (size_t) n_tok / 4 + 16;
+        if (!check(cudaMalloc((void**) &rx_, rx_n_ * E * sizeof(float)), "helper rows x", err, device_)) { rx_n_ = 0; return false; }
+    }
+    if (!rows_room((size_t) n_rows, (size_t) n_rows, err)) return false;
+    std::vector<unsigned long long> ptr((size_t) n_rows);
+    for (int r = 0; r < n_rows; ++r) {
+        if (keys[r] < 0 || (size_t) keys[r] >= slots_.size() || !owns(keys[r]) || tok[r] < 0 || tok[r] >= n_tok) {
+            err = "GLM expert helper: a prompt row's expert is not owned here (or its token is outside)";
+            return false;
+        }
+        ptr[(size_t) r] = (unsigned long long) slots_[(size_t) keys[r]].device;
+    }
+    if (!check(cudaMemcpyAsync(rx_, x, (size_t) n_tok * E * sizeof(float), cudaMemcpyHostToDevice, stream_),
+               "helper rows input", err, device_) ||
+        !check(cudaMemcpyAsync(rptr_, ptr.data(), (size_t) n_rows * sizeof(ptr[0]), cudaMemcpyHostToDevice, stream_),
+               "helper rows pointers", err, device_)) return false;
+    gf::MoeDev d = plan_;
+    d.plan_w = rone_;
+    int last_tok = -1;
+    for (int r = 0; r < n_rows; ++r) {
+        d.plan_ptr = rptr_ + r;
+        if (tok[r] != last_tok) {   // (rows arrive grouped by token where they can: one quantization each)
+            gf::quantize_q8_1(rx_ + (size_t) tok[r] * E, xq_, n_embd_, stream_);
+            last_tok = tok[r];
+        }
+        gf::moe_gate_up(gu_type, d, 1, n_embd_, n_ff_, limit, xq_, hq_, nullptr, 0, nullptr, 0, nullptr, stream_);
+        gf::moe_down(d_type, d, 1, n_embd_, n_ff_, down_off, hq_, nullptr, rout_ + (size_t) r * E, stream_);
+    }
+    return check(cudaMemcpyAsync(out, rout_, (size_t) n_rows * E * sizeof(float), cudaMemcpyDeviceToHost, stream_),
+                 "helper rows result", err, device_) &&
+           check(cudaStreamSynchronize(stream_), "helper rows finish", err, device_);
+}
+
+bool GlmExpertHelper::compute_tok(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x,
+                                  int n_groups, const int* tok, const int* ne, const int* keys, const float* w, float* out,
+                                  std::string& err) {
+    namespace gf = strata::kernels::glmf;
+    if (device_ < 0 || n_groups < 1 || n_tok < 1 || !gf::moe_supported(gu_type) || !gf::moe_supported(d_type)) {
+        err = "GLM expert helper: unsupported expert types or tokens";
+        return false;
+    }
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    const size_t E = (size_t) n_embd_;
+    if (rx_n_ < (size_t) n_tok) {
+        if (rx_) cudaFree(rx_);
+        rx_ = nullptr;
+        rx_n_ = (size_t) n_tok + (size_t) n_tok / 4 + 16;
+        if (!check(cudaMalloc((void**) &rx_, rx_n_ * E * sizeof(float)), "helper rows x", err, device_)) { rx_n_ = 0; return false; }
+    }
+    if (!rows_room((size_t) n_groups, (size_t) n_groups * 8, err)) return false;
+    std::vector<unsigned long long> ptr((size_t) n_groups * 8, 0);
+    for (int gi = 0; gi < n_groups; ++gi) {
+        if (ne[gi] < 1 || ne[gi] > 8 || tok[gi] < 0 || tok[gi] >= n_tok) {
+            err = "GLM expert helper: a token group is out of range";
+            return false;
+        }
+        for (int i = 0; i < ne[gi]; ++i) {
+            const int k = keys[(size_t) gi * 8 + i];
+            if (k < 0 || (size_t) k >= slots_.size() || !owns(k)) {
+                err = "GLM expert helper: a prompt row's expert is not owned here";
+                return false;
+            }
+            ptr[(size_t) gi * 8 + i] = (unsigned long long) slots_[(size_t) k].device;
+        }
+    }
+    if (!check(cudaMemcpyAsync(rx_, x, (size_t) n_tok * E * sizeof(float), cudaMemcpyHostToDevice, stream_),
+               "helper rows input", err, device_) ||
+        !check(cudaMemcpyAsync(rptr_, ptr.data(), ptr.size() * sizeof(ptr[0]), cudaMemcpyHostToDevice, stream_),
+               "helper rows pointers", err, device_) ||
+        !check(cudaMemcpyAsync(rw_, w, (size_t) n_groups * 8 * sizeof(float), cudaMemcpyHostToDevice, stream_),
+               "helper rows weights", err, device_)) return false;
+    gf::MoeDev d = plan_;
+    for (int gi = 0; gi < n_groups; ++gi) {
+        d.plan_ptr = rptr_ + (size_t) gi * 8;
+        d.plan_w = rw_ + (size_t) gi * 8;
+        gf::quantize_q8_1(rx_ + (size_t) tok[gi] * E, xq_, n_embd_, stream_);
+        gf::moe_gate_up(gu_type, d, ne[gi], n_embd_, n_ff_, limit, xq_, hq_, nullptr, 0, nullptr, 0, nullptr, stream_);
+        gf::moe_down(d_type, d, ne[gi], n_embd_, n_ff_, down_off, hq_, nullptr, rout_ + (size_t) gi * E, stream_);
+    }
+    return check(cudaMemcpyAsync(out, rout_, (size_t) n_groups * E * sizeof(float), cudaMemcpyDeviceToHost, stream_),
+                 "helper rows result", err, device_) &&
+           check(cudaStreamSynchronize(stream_), "helper rows finish", err, device_);
+}
+
+bool GlmExpertHelper::compute_tok_mmq(int gu_type, int d_type, size_t down_off, float limit, int n_tok, const float* x,
+                                      int n_groups, const int* tok, const int* ne, const int* keys, const float* w,
+                                      float* out, std::string& err) {
+    namespace mmq = strata::prefill::mmq;
+    namespace gb = strata::kernels::glmb;
+    const int gt = strata::kernels::gu_gate(gu_type), ut = strata::kernels::gu_up(gu_type);
+    const bool mix = strata::kernels::gu_mixed(gu_type);
+    if (device_ < 0 || n_groups < 1 || n_tok < 1 || !mmq::built() || !mmq::supported(gt) || !mmq::supported(ut) ||
+        !mmq::supported(d_type)) {
+        err = "GLM expert helper: MMQ does not cover these expert types";
+        return false;
+    }
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    const int E = n_embd_, F = n_ff_;
+    // the rows: every (group, expert) entry, sorted by expert (stable: a token's rows keep their order)
+    struct Ent { int key, tok, g, j; };
+    std::vector<Ent> ents;
+    ents.reserve((size_t) n_groups * 2);
+    std::vector<int> gofs((size_t) n_groups + 1, 0);
+    for (int gi = 0; gi < n_groups; ++gi) {
+        if (ne[gi] < 1 || ne[gi] > 8 || tok[gi] < 0 || tok[gi] >= n_tok) {
+            err = "GLM expert helper: a token group is out of range";
+            return false;
+        }
+        gofs[(size_t) gi + 1] = gofs[(size_t) gi] + ne[gi];
+        for (int i = 0; i < ne[gi]; ++i) {
+            const int k = keys[(size_t) gi * 8 + i];
+            if (k < 0 || (size_t) k >= slots_.size() || !owns(k)) {
+                err = "GLM expert helper: a prompt row's expert is not owned here";
+                return false;
+            }
+            ents.push_back(Ent{k, tok[gi], gi, gofs[(size_t) gi] + i});
+        }
+    }
+    std::stable_sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) { return a.key < b.key; });
+    const int R = (int) ents.size();
+    std::vector<int> rt((size_t) R), grow((size_t) R), bnd, ekey, ecnt;
+    std::vector<float> gw((size_t) R);
+    for (int r = 0; r < R; ++r) {
+        const auto& en = ents[(size_t) r];
+        rt[(size_t) r] = en.tok;
+        grow[(size_t) en.j] = r;
+        gw[(size_t) en.j] = w[(size_t) en.g * 8 + (en.j - gofs[(size_t) en.g])];
+        if (r == 0 || en.key != ents[(size_t) r - 1].key) {
+            bnd.push_back(r);
+            ekey.push_back(en.key);
+            ecnt.push_back(0);
+        }
+        ++ecnt.back();
+    }
+    bnd.push_back(R);
+    // device room
+    const auto grow_buf = [&](auto*& p, size_t& have, size_t want, size_t elem, const char* what) {
+        if (have >= want) return true;
+        if (p) cudaFree((void*) p);
+        p = nullptr;
+        const size_t n = want + want / 4 + 64;
+        if (!check(cudaMalloc((void**) &p, n * elem), what, err, device_)) { have = 0; return false; }
+        have = n;
+        return true;
+    };
+    size_t xq_need = mmq::q8_bytes(R, E) * (mix ? 1 : 1), hq_need = mmq::q8_bytes(R, F);
+    size_t rows_have = m_rows_n_, rows_have2 = m_rows_n_, rows_have3 = m_rows_n_, rows_have4 = m_rows_n_,
+           rows_have5 = m_rows_n_, rows_have6 = m_rows_n_;
+    if (m_rows_n_ < (size_t) R) {
+        if (!grow_buf(mrt_, rows_have, (size_t) R, sizeof(int), "helper mmq rows") ||
+            !grow_buf(miota_, rows_have2, (size_t) R, sizeof(int), "helper mmq iota") ||
+            !grow_buf(mgrow_, rows_have3, (size_t) R, sizeof(int), "helper mmq grow") ||
+            !grow_buf(mgw_, rows_have4, (size_t) R, sizeof(float), "helper mmq weights") ||
+            !grow_buf(mgu_, rows_have5, (size_t) R * 2 * F, sizeof(float), "helper mmq gate/up") ||
+            !grow_buf(mout_, rows_have6, (size_t) R * E, sizeof(float), "helper mmq out"))
+            return false;
+        // (every buffer grew by the same rule: the smallest count is the rows they all hold)
+        m_rows_n_ = std::min({rows_have, rows_have2, rows_have3, rows_have4, rows_have5 / (2 * (size_t) F),
+                              rows_have6 / (size_t) E});
+        mmq::iota(miota_, (int64_t) m_rows_n_, stream_);
+    }
+    if (!grow_buf(mbnd_, m_bnd_n_, bnd.size(), sizeof(int), "helper mmq bounds") ||
+        !grow_buf(mgofs_, m_groups_n_, gofs.size(), sizeof(int), "helper mmq groups") ||
+        !grow_buf(mxq_, m_xq_n_, xq_need, 1, "helper mmq x") || !grow_buf(mhq_, m_hq_n_, hq_need, 1, "helper mmq h"))
+        return false;
+    if (rx_n_ < (size_t) n_tok) {
+        if (rx_) cudaFree(rx_);
+        rx_ = nullptr;
+        rx_n_ = (size_t) n_tok + (size_t) n_tok / 4 + 16;
+        if (!check(cudaMalloc((void**) &rx_, rx_n_ * (size_t) E * sizeof(float)), "helper rows x", err, device_)) { rx_n_ = 0; return false; }
+    }
+    if (!rows_room((size_t) n_groups, 8, err)) return false;   // rout_: the groups' sums
+    if (mq_ == nullptr) mq_ = new mmq::Context();
+    auto& mq = *(mmq::Context*) mq_;
+    const cudaStream_t s = stream_;
+    if (!check(cudaMemcpyAsync(rx_, x, (size_t) n_tok * E * sizeof(float), cudaMemcpyHostToDevice, s), "helper mmq x", err, device_) ||
+        !check(cudaMemcpyAsync(mrt_, rt.data(), (size_t) R * sizeof(int), cudaMemcpyHostToDevice, s), "helper mmq rows", err, device_) ||
+        !check(cudaMemcpyAsync(mgrow_, grow.data(), (size_t) R * sizeof(int), cudaMemcpyHostToDevice, s), "helper mmq grow", err, device_) ||
+        !check(cudaMemcpyAsync(mgw_, gw.data(), (size_t) R * sizeof(float), cudaMemcpyHostToDevice, s), "helper mmq weights", err, device_) ||
+        !check(cudaMemcpyAsync(mbnd_, bnd.data(), bnd.size() * sizeof(int), cudaMemcpyHostToDevice, s), "helper mmq bounds", err, device_) ||
+        !check(cudaMemcpyAsync(mgofs_, gofs.data(), gofs.size() * sizeof(int), cudaMemcpyHostToDevice, s), "helper mmq groups", err, device_))
+        return false;
+    const bool glu = !mix && mmq::glu_supported(gt, F);
+    const size_t g_bytes = mmq::matrix_bytes(gt, mix ? F : 2 * (int64_t) F, E);
+    const size_t gate_bytes = mmq::matrix_bytes(gt, F, E);
+    const size_t d_bytes = mmq::matrix_bytes(d_type, E, F);
+    // gate/up: rows R x 2F (h in each row's first F floats after the SwiGLU)
+    mmq::quantize(rx_, mrt_, mxq_, gt, E, E, R, s);
+    for (size_t i = 0; i + 1 < bnd.size(); ++i) {
+        mmq::Product gu;
+        gu.w = slots_[(size_t) ekey[i]].device;
+        gu.type = gt;
+        gu.w_rows = mix ? F : 2 * F;
+        gu.w_cols = E;
+        gu.expert_bytes = g_bytes;
+        gu.n = 1;
+        gu.xq = mxq_;
+        gu.bounds = mbnd_ + i;
+        gu.ids = miota_;
+        gu.total_rows = R;
+        gu.max_rows = ecnt[i];
+        gu.dst = mgu_;
+        gu.ld_dst = 2 * F;
+        if (glu) mq.run_glu(gu, limit, s);
+        else mq.run(gu, s);
+    }
+    if (mix) {
+        mmq::quantize(rx_, mrt_, mxq_, ut, E, E, R, s);
+        for (size_t i = 0; i + 1 < bnd.size(); ++i) {
+            mmq::Product up;
+            up.w = slots_[(size_t) ekey[i]].device + gate_bytes;
+            up.type = ut;
+            up.w_rows = F;
+            up.w_cols = E;
+            up.expert_bytes = mmq::matrix_bytes(ut, F, E);
+            up.n = 1;
+            up.xq = mxq_;
+            up.bounds = mbnd_ + i;
+            up.ids = miota_;
+            up.total_rows = R;
+            up.max_rows = ecnt[i];
+            up.dst = mgu_ + F;
+            up.ld_dst = 2 * F;
+            mq.run(up, s);
+        }
+    }
+    if (!glu) gb::swiglu_rows(mgu_, mgu_, R, F, limit, s, 2 * F);
+    // down: rows R x E
+    mmq::quantize(mgu_, nullptr, mhq_, d_type, F, 2 * F, R, s);
+    for (size_t i = 0; i + 1 < bnd.size(); ++i) {
+        mmq::Product dn;
+        dn.w = slots_[(size_t) ekey[i]].device + down_off;
+        dn.type = d_type;
+        dn.w_rows = E;
+        dn.w_cols = F;
+        dn.expert_bytes = d_bytes;
+        dn.n = 1;
+        dn.xq = mhq_;
+        dn.bounds = mbnd_ + i;
+        dn.ids = miota_;
+        dn.total_rows = R;
+        dn.max_rows = ecnt[i];
+        dn.dst = mout_;
+        dn.ld_dst = E;
+        mq.run(dn, s);
+    }
+    gb::rows_group_sum(mout_, mgofs_, mgrow_, mgw_, n_groups, E, rout_, s);
+    return check(cudaMemcpyAsync(out, rout_, (size_t) n_groups * E * sizeof(float), cudaMemcpyDeviceToHost, s),
+                 "helper mmq result", err, device_) &&
+           check(cudaStreamSynchronize(s), "helper mmq finish", err, device_);
 }
 
 void GlmExpertHelper::close() {
@@ -248,11 +579,24 @@ void GlmExpertHelper::close() {
     DeviceScope scope(device_);
     if (scope.ok) {
         if (stream_) cudaStreamSynchronize(stream_);
+        for (void* p : {(void*) rx_, (void*) rout_, (void*) rone_, (void*) rptr_, (void*) rw_}) if (p) cudaFree(p);
+        for (void* p : {(void*) mrt_, (void*) mbnd_, (void*) miota_, (void*) mgofs_, (void*) mgrow_, (void*) mgw_, (void*) mgu_,
+                        (void*) mout_, mxq_, mhq_}) if (p) cudaFree(p);
+        delete (strata::prefill::mmq::Context*) mq_;
         if (arena_) cudaFree(arena_);
         if (pool_) cudaFree(pool_);
         if (stream_) cudaStreamDestroy(stream_);
     }
     device_ = -1;
+    rx_ = rout_ = rone_ = nullptr;
+    rptr_ = nullptr;
+    rw_ = nullptr;
+    rx_n_ = rrows_n_ = rents_n_ = 0;
+    mq_ = nullptr;
+    mrt_ = mbnd_ = miota_ = mgofs_ = mgrow_ = nullptr;
+    mgw_ = mgu_ = mout_ = nullptr;
+    mxq_ = mhq_ = nullptr;
+    m_rows_n_ = m_groups_n_ = m_bnd_n_ = m_xq_n_ = m_hq_n_ = 0;
     arena_ = nullptr;
     pool_ = nullptr;
     capacity_ = used_ = 0;

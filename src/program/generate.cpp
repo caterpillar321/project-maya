@@ -2114,6 +2114,24 @@ static int glm_pack_generate(const Options& o) {
                     reuse, (unsigned long long) d_hits, (unsigned long long) (d_hits + d_miss));
         std::fflush(stdout);
         if (pause_req.load() && std::strcmp(finish, "cancel") == 0) pause_snapshot(prompt, emitted, pause_keep.load());
+        // THE ANSWER'S END (10-26): a chat's next turn is this prompt + this answer + the new message, so the state where
+        // the answer stopped (every written token but the stop marker fed) becomes the snapshot - the next turn reads
+        // only its new message instead of the whole answer again.  The prompt's snapshot is kept as a checkpoint
+        // first (a client that drops the reasoning or re-tokenizes the answer differently still mounts there, as
+        // before).  The server hands the engine the answer's own ids for that turn (serve/server.py: splice).
+        // STRATA_GLM_KEEP_ANSWER=1: on (off by default; the server splices only with it on).
+        if (std::strcmp(finish, "stop") == 0 && !pause_req.load()) {
+            static const bool keep_answer = [] { const char* v = getenv("STRATA_GLM_KEEP_ANSWER"); return v && atoi(v) != 0; }();
+            if (keep_answer && model.fast() && cur_img_pos.empty() && !emitted.empty() &&
+                snap_tokens.size() + 1 == prompt.size() && std::equal(snap_tokens.begin(), snap_tokens.end(), prompt.begin())) {
+                bool have = false;
+                for (const auto& c : ckpts)
+                    have = have || (c.tokens.size() == snap_tokens.size() &&
+                                    std::equal(c.tokens.begin(), c.tokens.end(), prompt.begin()));
+                if (ckpt_max > 0 && snap_tokens.size() >= 512 && !have) ckpt_keep(prompt, snap_tokens.size(), true);
+                pause_snapshot(prompt, emitted, false);
+            }
+        }
         // this machine's expert usage, for the next start's warm-up (after DONE: the client is not kept waiting)
         if (model.fast()) model.save_usage();
         if (model.fast() && produced > 0) {
@@ -2130,6 +2148,7 @@ static int glm_pack_generate(const Options& o) {
                          (double) (st2.cpu_experts - st1.cpu_experts) / n, (st2.cpu_ms - st1.cpu_ms) / n,
                          prompt_ms / (double) std::max<size_t>(1, prompt.size()), (long long) st2.pool_used,
                          (long long) st2.pool_slots, (long long) st2.ram_used, (long long) st2.ram_slots);
+            model.fast_prof_flush();
             if (st2.disk_skips > st1.disk_skips)
                 std::fprintf(stderr, "glm skip: %.2f disk-only experts/tok left out (MAYA_GLM_DISK_SKIP_W / _FROM)\n",
                              (double) (st2.disk_skips - st1.disk_skips) / n);

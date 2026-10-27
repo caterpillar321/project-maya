@@ -751,6 +751,11 @@ struct Glm5Model::PrefillState {
     std::vector<float> c_ff;
     std::vector<float> c_x3;   // EXL3: the CPU rows' inputs, byte sums and down inputs
     uint64_t cpu_experts = 0, cpu_rows = 0;
+    uint64_t net_experts = 0, net_rows = 0;   // the net helpers' share of short prompts (STRATA_GLM_NET_PREFILL_MAX)
+    double ms_net = 0;
+    float* net_h[2] = {nullptr, nullptr};     // their tokens' sums (pinned, by layer parity: a layer's upload may still
+    size_t net_h_n = 0;                       // be queued on the copy stream when the next layer's sums land)
+    cudaEvent_t net_ev[2] = {nullptr, nullptr};
     double ms_cpu = 0, row_ms = 0.05;   // row_ms: the host's cost of a row, learned (the split's estimate)
     // the split's balance, learned: the host's estimates times kappa, nudged each layer by the host's time over the
     // copy stream's (ev_c0 .. ev_c1: the staged copies) - the two lanes should end together
@@ -1066,7 +1071,8 @@ bool Glm5Model::prefill_setup(std::string& err) {
             deq_ok(Ly.sh_gate, "ffn_gate_shexp", il);
             deq_ok(Ly.sh_up, "ffn_up_shexp", il);
             deq_ok(Ly.sh_down, "ffn_down_shexp", il);
-            if (!Ly.exl3 && (!mmq::supported(Ly.gu_type) || !mmq::supported(Ly.d_type)))   // (EXL3: run_set_x3)
+            if (!Ly.exl3 && (!mmq::supported(strata::kernels::gu_gate(Ly.gu_type)) ||   // (EXL3: run_set_x3)
+                             !mmq::supported(strata::kernels::gu_up(Ly.gu_type)) || !mmq::supported(Ly.d_type)))
                 why += "blk." + std::to_string(il) + " experts (types " + std::to_string(Ly.gu_type) + "/" +
                        std::to_string(Ly.d_type) + ") ";
             gstride = std::max(gstride, glmfast::expert_stride(Ly.blob, Ly.gu_type, Ly.d_type));
@@ -1664,6 +1670,8 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
     // background moves in flight land first and no new ones start (fast_boundary step 5): a slot with a copy on its
     // way would otherwise be lent under it
     F->bg_hold = true;
+    drop_preload_quiesce();   // (no preload copy may land in a slot this lending takes)
+    F->drop_keys.clear();
     // Retire metadata as well as DMA. With the hold set, the boundary cannot start replacement moves.
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->copy), "glm lending copies", err) || !fast_boundary(err))
         return false;
@@ -1779,7 +1787,7 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
                             return false;
                         upd(F->tab_key((size_t) vkey), 0ull);
                         F->slot_of[(size_t) vkey] = -1;
-                        if (!parked) F->left[(size_t) vkey] = 3;
+                        if (!parked) { F->left[(size_t) vkey] = 3; F->drop_keys.push_back(vkey); }
                         upd(F->tab_key((size_t) key), (unsigned long long) P.slot_ptr(v));
                         F->slot_of[(size_t) key] = v;
                         P.key[(size_t) v] = P.key[(size_t) s];
@@ -1788,7 +1796,7 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
                     } else {
                         upd(F->tab_key((size_t) key), 0ull);
                         F->slot_of[(size_t) key] = -1;
-                        if (!park(il, s, key)) F->left[(size_t) key] = 3;
+                        if (!park(il, s, key)) { F->left[(size_t) key] = 3; F->drop_keys.push_back(key); }
                         if (!ok) return false;
                     }
                     ++dropped;
@@ -1829,6 +1837,48 @@ bool Glm5Model::prefill_return(std::string& err) {
         for (int s = P.n_main; s < P.n; ++s)
             if (P.st[(size_t) s] == FastState::kLent) P.st[(size_t) s] = FastState::kFree;
     }
+    F->refill_burst = true;   // (fast_boundary: the freed tail is refilled in bulk when STRATA_GLM_VRAM_REFILL is set)
+    static const bool preload = [] { const char* v = getenv("STRATA_GLM_DROP_PRELOAD"); return v && std::atoi(v) != 0; }();
+    if (preload && !F->drop_keys.empty()) {
+        const int NE = g_.n_expert;
+        std::vector<int> keys;
+        for (int key : F->drop_keys)
+            if (F->slot_of[(size_t) key] < 0 && F->ram_of[(size_t) key] < 0 && !F->aux_owns(key)) keys.push_back(key);
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        std::stable_sort(keys.begin(), keys.end(), [&](int a, int b) { return F->cnt[(size_t) a] > F->cnt[(size_t) b]; });
+        std::vector<int> nfree((size_t) lt_, 0);
+        for (int il = l0_; il < lt_; ++il) {
+            const auto& P = F->lp[(size_t) il];
+            for (int s = 0; s < P.n; ++s) nfree[(size_t) il] += P.st[(size_t) s] == FastState::kFree;
+        }
+        std::vector<FastState::PreJob> jobs;
+        for (int key : keys) {
+            const int il = key / NE, e = key % NE;
+            auto& P = F->lp[(size_t) il];
+            if (nfree[(size_t) il] <= gf::kSpares) continue;   // (the layer's spares keep their free slots)
+            int s = -1;
+            for (int s2 = P.n - 1; s2 >= 0 && s < 0; --s2)
+                if (P.st[(size_t) s2] == FastState::kFree) s = s2;
+            if (s < 0) continue;
+            P.st[(size_t) s] = FastState::kLanding;
+            --nfree[(size_t) il];
+            jobs.push_back(FastState::PreJob{il, e, s, P.slot_ptr(s)});
+        }
+        F->drop_keys.clear();
+        if (!jobs.empty()) {
+            F->pre_claimed += jobs.size();
+            {
+                std::lock_guard<std::mutex> lq(F->pre_mu);
+                F->pre_q.insert(F->pre_q.end(), jobs.begin(), jobs.end());
+            }
+            if (!F->pre_th.joinable()) F->pre_th = std::thread([this] { drop_preload_worker(); });
+            F->pre_cv.notify_all();
+            std::fprintf(stderr, "glm fast: CUDA%d drop preload: %zu of the prompt's dropped experts queued into the "
+                                 "returned slots\n", dev_, jobs.size());
+        }
+    }
+    F->burst_filled = 0;
     S->lent = false;
     return true;
 }
@@ -1860,6 +1910,8 @@ void Glm5Model::prefill_destroy() {
     if (S->x_h) cudaFreeHost(S->x_h);
     if (S->rt_h) cudaFreeHost(S->rt_h);
     if (S->out_h) cudaFreeHost(S->out_h);
+    for (auto& b : S->net_h) if (b) cudaFreeHost(b);
+    for (auto& e : S->net_ev) if (e) cudaEventDestroy(e);
     if (S->ev_x) cudaEventDestroy(S->ev_x);
     if (S->ev_out) cudaEventDestroy(S->ev_out);
     if (S->ev_c0) cudaEventDestroy(S->ev_c0);
@@ -2201,6 +2253,24 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     }();
     int pred_layer = -1, pred0 = 0;   // the predicted segment: its layer, first index and experts (ascending)
     std::vector<int> pred_e;
+    // STRATA_GLM_NET_PREFILL_MAX=<tokens>: a chunk of at most this many tokens has the net helpers (maya-helperd on
+    // other machines) compute the rows of the experts they own - a short prompt then neither reads those experts from
+    // the disk nor stages them over PCIe; only the tokens' inputs and the rows' outputs cross the network (FP16).
+    // 0 (default): they are staged like any other expert
+    static const int net_pf_max = [] {
+        const char* v = getenv("STRATA_GLM_NET_PREFILL_MAX");
+        return v ? std::atoi(v) : 0;
+    }();
+    // (only while the MoE window holds every routed row: a windowed chunk - T x K past ~22K rows, ~2.7K tokens - places
+    // its rows in pieces, and the net segment's rows are never placed; such chunks stage as before)
+    const bool net_pf = net_pf_max > 0 && T <= net_pf_max && (size_t) T * K <= (size_t) moe_window_rows((size_t) T, g) &&
+                        !F->net.empty() && !F->net_of.empty() && !F->helper_failed.load(std::memory_order_acquire);
+    // STRATA_GLM_NET_PREFILL_TOK=0: the helpers answer each row (kRows); default: each token's weighted sum over its
+    // rows there (kTokRows - a fifth of the bytes back, one kernel set a token), added into ffn after the combine
+    static const bool net_tok = [] {
+        const char* v = getenv("STRATA_GLM_NET_PREFILL_TOK");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
     // the experts of layer il that are neither resident in its main slots nor held by the RAM tier (ascending)
     const auto disk_only = [&](int il) {
         std::vector<int> v;
@@ -2216,6 +2286,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             if (rs >= 0 && (RC.st[(size_t) rs] == FastState::kRHold || RC.st[(size_t) rs] == FastState::kRHelper)) continue;
             const int vs = F->slot_of[(size_t) il * g.n_expert + e];   // a tail slot this prompt did not borrow
             if (vs >= 0 && P.st[(size_t) vs] == FastState::kResident) continue;
+            if (net_pf && F->net_of[(size_t) il * g.n_expert + e] != 0) continue;   // a net helper computes it
             v.push_back(e);
         }
         return v;
@@ -2932,6 +3003,29 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 staged.swap(rest);
             }
         }
+        // THE NET HELPERS' SHARE (net_pf): the experts a net helper owns leave the staged set; their rows go after the
+        // CPU's (same host buffers, same upload into OUTPc) when the window holds both
+        std::vector<Staged> net_set;
+        if (net_pf) {
+            int cpu_rows_n = 0, net_rows_n = 0;
+            for (const auto& cx : cpu_set) cpu_rows_n += S->h_counts[cx.e];
+            std::vector<Staged> rest;
+            for (const auto& st : staged) {
+                if (!st.dev && F->net_of[(size_t) il * g.n_expert + st.e] != 0) {
+                    net_set.push_back(st);
+                    net_rows_n += S->h_counts[st.e];
+                } else {
+                    rest.push_back(st);
+                }
+            }
+            // (their disk reads were left out of the reader's prediction: the window must hold their rows)
+            if (cpu_rows_n + net_rows_n > moe_window_rows((size_t) T, g) - (calc_on ? T : 0)) {
+                err = "glm prefill: the net helpers' rows do not fit the MoE window - set STRATA_GLM_PREFILL_WINDOW=0 "
+                      "with STRATA_GLM_NET_PREFILL_MAX";
+                return false;
+            }
+            staged.swap(rest);
+        }
         // THE OTHER PART'S SHARE (STRATA_GLM_PREFILL_CALC): calc_share of the RAM-tier experts left go to the waiting
         // GPU - the lightest ones when it has fewer multiprocessors than this one (the slower at computing), else the
         // most routed; this GPU keeps the rest, the VRAM-tail and the disk ones.  Their rows go last in the sorted
@@ -2978,6 +3072,12 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             rows += S->h_counts[cx.e];
         }
         const int cpu_nrows = rows - cpu_r0;
+        const int net_r0 = rows;
+        for (const auto& nx : net_set) {
+            S->h_base[nx.e] = rows;
+            rows += S->h_counts[nx.e];
+        }
+        const int net_nrows = rows - net_r0;
         const int calc_r0 = rows;
         for (const auto& cx : calc_set) {
             S->h_base[cx.e] = rows;
@@ -2998,15 +3098,178 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         if (n_light > 0)
             cudaMemcpyAsync(M.bounds + kLightOff, h_light, (size_t) 3 * n_light * sizeof(int), cudaMemcpyHostToDevice, s);
         gb::expert_scatter(M.ids, M.rank, M.base, T * K, K, M.row_tok, M.pos, s);
-        if (cpu_nrows > 0) {
-            if (!cpu_bufs(cpu_nrows)) {
+        const int net_out_rows = net_nrows > 0 ? (net_tok ? T : net_nrows) : 0;   // out_h rows after the CPU's
+        if (net_nrows > 0 && net_tok && cpu_nrows + T > moe_window_rows((size_t) T, g)) {
+            err = "glm prefill: the net helpers' token sums do not fit beside the CPU rows";
+            return false;
+        }
+        if (cpu_nrows + net_nrows > 0) {
+            if (!cpu_bufs(cpu_nrows + (net_tok ? 0 : net_out_rows))) {
                 err = "glm prefill: the CPU experts' host buffers did not allocate";
                 return false;
             }
             cudaEventRecord(S->ev_x, s);   // the scatter (and x) are done up to here
             cudaStreamWaitEvent(S->xs, S->ev_x, 0);
             if (!x_down) cudaMemcpyAsync(S->x_h, S->x, (size_t) T * E * sizeof(float), cudaMemcpyDeviceToHost, S->xs);
-            cudaMemcpyAsync(S->rt_h, M.row_tok + cpu_r0, (size_t) cpu_nrows * sizeof(int), cudaMemcpyDeviceToHost, S->xs);
+            const int rt_rows = cpu_nrows + (net_tok ? 0 : net_nrows);   // (token sums need no row tokens)
+            if (rt_rows > 0)
+                cudaMemcpyAsync(S->rt_h, M.row_tok + cpu_r0, (size_t) rt_rows * sizeof(int), cudaMemcpyDeviceToHost,
+                                S->xs);
+        }
+        // the net helpers' rows: a thread sends each helper its tokens' inputs and rows once x is down, and lands the
+        // answers in out_h after the CPU rows' (the copy stream uploads them before the combine)
+        const int net_par = il & 1;
+        if (net_nrows > 0 && net_tok) {
+            if (S->net_ev[0] == nullptr)
+                for (auto& e : S->net_ev) cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+            if (S->net_h_n < (size_t) T * E) {
+                for (auto& b : S->net_h) {
+                    if (b) { cudaFreeHost(b); b = nullptr; }
+                }
+                S->net_h_n = (size_t) T * E;
+                for (auto& b : S->net_h)
+                    if (cudaHostAlloc((void**) &b, S->net_h_n * sizeof(float), cudaHostAllocDefault) != cudaSuccess) {
+                        err = "glm prefill: the net helpers' pinned sums did not allocate";
+                        return false;
+                    }
+            }
+        }
+        std::thread net_th;
+        struct JoinAtExit {
+            std::thread& t;
+            ~JoinAtExit() { if (t.joinable()) t.join(); }
+        } net_join{net_th};   // (an error return between here and the combine must not leave it running)
+        bool net_ok = true;
+        std::string net_err;
+        double net_ms = 0.0;
+        if (net_nrows > 0) {
+            const auto& NL = F->L[(size_t) il];
+            const float limit = g.swiglu_exp;
+            net_th = std::thread([&, il, limit, gu = NL.gu_type, dt = NL.d_type, doff = NL.down_off]() {
+                const auto t0 = std::chrono::steady_clock::now();
+                if (cudaStreamSynchronize(S->xs) != cudaSuccess) {
+                    net_ok = false;
+                    net_err = "glm prefill: the net rows' inputs did not come down";
+                    return;
+                }
+                const size_t nh = F->net.size();
+                if (net_tok) {   // each token's rows here as (token, key, weight), grouped by token; sums come back
+                    std::vector<int> ids_h((size_t) T * K);
+                    std::vector<float> rw_h((size_t) T * K);
+                    if (cudaMemcpyAsync(ids_h.data(), M.ids, ids_h.size() * sizeof(int), cudaMemcpyDeviceToHost, S->xs) !=
+                            cudaSuccess ||
+                        cudaMemcpyAsync(rw_h.data(), M.rw, rw_h.size() * sizeof(float), cudaMemcpyDeviceToHost, S->xs) !=
+                            cudaSuccess ||
+                        cudaStreamSynchronize(S->xs) != cudaSuccess) {
+                        net_ok = false;
+                        net_err = "glm prefill: the routes did not come down for the net helpers";
+                        return;
+                    }
+                    std::vector<std::vector<int>> toks(nh);
+                    std::vector<std::vector<strata::core::netproto::TokEntry>> ents(nh);
+                    for (int t = 0; t < T; ++t) {
+                        int last[4] = {-1, -1, -1, -1};
+                        for (int k = 0; k < K; ++k) {
+                            const int key = il * g.n_expert + ids_h[(size_t) t * K + k];
+                            const int j = (int) F->net_of[(size_t) key] - 1;
+                            if (j < 0) continue;
+                            if (last[j] != t) {
+                                last[j] = t;
+                                toks[(size_t) j].push_back(t);
+                            }
+                            ents[(size_t) j].push_back(strata::core::netproto::TokEntry{
+                                (int) toks[(size_t) j].size() - 1, key, rw_h[(size_t) t * K + k]});
+                        }
+                    }
+                    std::vector<std::vector<uint16_t>> xin(nh), ans(nh);
+                    std::vector<std::thread> io;
+                    std::vector<std::string> ierr(nh);
+                    std::vector<char> iok(nh, 1);
+                    for (size_t j = 0; j < nh; ++j) {
+                        if (ents[j].empty()) continue;
+                        io.emplace_back([&, j]() {
+                            const auto& tl = toks[j];
+                            xin[j].resize(tl.size() * (size_t) E);
+                            for (size_t q = 0; q < tl.size(); ++q) {
+                                const float* src = S->x_h + (size_t) tl[q] * E;
+                                _Float16* dst = (_Float16*) xin[j].data() + q * (size_t) E;
+                                for (int c = 0; c < E; ++c) dst[c] = (_Float16) src[c];
+                            }
+                            ans[j].resize(tl.size() * (size_t) E);
+                            auto& h = *F->net[j];
+                            if (!h.tok_begin(gu, dt, doff, limit, (int) tl.size(), xin[j].data(), (int) ents[j].size(),
+                                             ents[j].data(), ierr[j]) ||
+                                !h.rows_finish(ans[j].data(), (int) tl.size(), ierr[j]))
+                                iok[j] = 0;
+                        });
+                    }
+                    for (auto& t : io) t.join();
+                    float* sum = S->net_h[net_par];   // T rows: the tokens' sums from every helper
+                    cudaEventSynchronize(S->net_ev[net_par]);   // (two layers back's upload of this buffer is done)
+                    std::memset(sum, 0, (size_t) T * E * sizeof(float));
+                    for (size_t j = 0; j < nh; ++j) {
+                        if (!iok[j]) { net_ok = false; net_err = ierr[j]; continue; }
+                        for (size_t q = 0; q < toks[j].size(); ++q) {
+                            float* o = sum + (size_t) toks[j][q] * E;
+                            const _Float16* a = (const _Float16*) ans[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) o[c] += (float) a[c];
+                        }
+                    }
+                    net_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    return;
+                }
+                std::vector<std::vector<int>> tok_of(nh), row_of(nh);              // per helper: its tokens, its rows
+                std::vector<std::vector<strata::core::netproto::RowRef>> refs(nh);
+                std::vector<std::vector<int>> lt_of(nh, std::vector<int>((size_t) T, -1));   // token -> its index there
+                for (const auto& nx : net_set) {
+                    const int key = il * g.n_expert + nx.e;
+                    const int j = (int) F->net_of[(size_t) key] - 1;
+                    for (int t = 0; t < S->h_counts[nx.e]; ++t) {
+                        const int row = S->h_base[nx.e] + t;
+                        const int tok = S->rt_h[row - cpu_r0];
+                        int& lt = lt_of[(size_t) j][(size_t) tok];
+                        if (lt < 0) {
+                            lt = (int) tok_of[(size_t) j].size();
+                            tok_of[(size_t) j].push_back(tok);
+                        }
+                        refs[(size_t) j].push_back(strata::core::netproto::RowRef{lt, key});
+                        row_of[(size_t) j].push_back(row);
+                    }
+                }
+                std::vector<std::vector<uint16_t>> xin(nh), ans(nh);
+                std::vector<std::thread> io;
+                std::vector<std::string> ierr(nh);
+                std::vector<char> iok(nh, 1);
+                for (size_t j = 0; j < nh; ++j) {
+                    if (refs[j].empty()) continue;
+                    io.emplace_back([&, j]() {
+                        const auto& tl = tok_of[j];
+                        xin[j].resize(tl.size() * (size_t) E);
+                        for (size_t q = 0; q < tl.size(); ++q) {
+                            const float* src = S->x_h + (size_t) tl[q] * E;
+                            _Float16* dst = (_Float16*) xin[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) dst[c] = (_Float16) src[c];
+                        }
+                        ans[j].resize(refs[j].size() * (size_t) E);
+                        auto& h = *F->net[j];
+                        if (!h.rows_begin(gu, dt, doff, limit, (int) tl.size(), xin[j].data(), (int) refs[j].size(),
+                                          refs[j].data(), ierr[j]) ||
+                            !h.rows_finish(ans[j].data(), (int) refs[j].size(), ierr[j])) {
+                            iok[j] = 0;
+                            return;
+                        }
+                        for (size_t q = 0; q < row_of[j].size(); ++q) {
+                            float* o = S->out_h + (size_t) (row_of[j][q] - cpu_r0) * E;
+                            const _Float16* a = (const _Float16*) ans[j].data() + q * (size_t) E;
+                            for (int c = 0; c < E; ++c) o[c] = (float) a[c];
+                        }
+                    });
+                }
+                for (auto& t : io) t.join();
+                for (size_t j = 0; j < nh; ++j)
+                    if (!iok[j]) { net_ok = false; net_err = ierr[j]; }
+                net_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            });
         }
         S->mark("plan", s);
         const double plan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp).count();
@@ -3194,7 +3457,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             const char* v = getenv("STRATA_GLM_MMQ_GLU");
             return v == nullptr || std::atoi(v) != 0;
         }();
-        const bool glu = glu_on && mmq::glu_supported(Ly.gu_type, nff);
+        // a gu_code layer (gate and up in two types): two MMQ products, the separate SwiGLU
+        const bool gu_mix = strata::kernels::gu_mixed(Ly.gu_type);
+        const bool glu = glu_on && !gu_mix && mmq::glu_supported(Ly.gu_type, nff);
         // the Volta grouped-WMMA products for this layer (STRATA_PF_WMMA): the run_set's branch below converts the
         // activations to FP16 and runs both products on the tensor cores; a rejected launch falls back to MMQ once
         const bool wmma = moe_wmma_on(Ly.gu_type, Ly.d_type, E, nff);
@@ -3264,11 +3529,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                             }
                         }
                     }
-                    mmq::quantize(S->x, M.row_tok + r0 + a, M.Xq, Ly.gu_type, E, E, nrows, s);
+                    mmq::quantize(S->x, M.row_tok + r0 + a, M.Xq, strata::kernels::gu_gate(Ly.gu_type), E, E, nrows, s);
                     mmq::Product gu;
                     gu.w = wbase + (size_t) i0 * stride;
-                    gu.type = Ly.gu_type;
-                    gu.w_rows = 2 * nff;
+                    gu.type = strata::kernels::gu_gate(Ly.gu_type);
+                    gu.w_rows = gu_mix ? nff : 2 * nff;
                     gu.w_cols = E;
                     gu.expert_bytes = stride;
                     gu.n = i1 - i0;
@@ -3279,7 +3544,18 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                     gu.max_rows = max_rows;
                     gu.dst = GU - (size_t) a * (2 * nff);
                     gu.ld_dst = 2 * nff;
-                    if (glu) {
+                    if (gu_mix) {
+                        // the gate rows into each row's first n_ff floats, then the up rows (their own type, their
+                        // own activation layout) into the second n_ff
+                        S->mq->run(gu, s);
+                        mmq::quantize(S->x, M.row_tok + r0 + a, M.Xq, strata::kernels::gu_up(Ly.gu_type), E, E, nrows, s);
+                        mmq::Product up = gu;
+                        up.w = wbase + (size_t) i0 * stride + Ly.gu_bytes;
+                        up.type = strata::kernels::gu_up(Ly.gu_type);
+                        up.dst = gu.dst + nff;
+                        S->mq->run(up, s);
+                        gb::swiglu_rows(GU, GU, nrows, nff, g.swiglu_exp, s, 2 * nff);
+                    } else if (glu) {
                         S->mq->run_glu(gu, g.swiglu_exp, s);   // (h in each row's first n_ff floats, as below)
                     } else {
                         S->mq->run(gu, s);
@@ -3350,7 +3626,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             return blas_dev[dev] - 1;
 #endif
         }();
-        const bool use_blas = blas_rows > 0 && !Ly.exl3 && mmq::to_f16_supported(Ly.gu_type) &&
+        const bool use_blas = blas_rows > 0 && !Ly.exl3 && !gu_mix && mmq::to_f16_supported(Ly.gu_type) &&
                               mmq::to_f16_supported(Ly.d_type) && S->w16_elems >= (int64_t) 2 * nff * E + E;
         const auto run_blas_q = [&](const uint8_t* blob, int a, int nrows, int r0) {
             namespace x3 = strata::kernels::exl3;
@@ -3653,7 +3929,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 size_t pack_a = 0, pack_h = 0;
                 for (int j = 0; j < ncx; ++j) {
                     const int cnt = S->h_counts[cpu_set[(size_t) j].e];
-                    if (kq_use(nf.gu_type, nf.gu_act, cnt)) {
+                    if (kq_use(nf.gu_type, nf.gu_act, cnt) && kq_use(nf.up_type >= 0 ? nf.up_type : nf.gu_type, nf.gu_act, cnt)) {
                         off_a[(size_t) j] = pack_a;
                         pack_a += (kc::kq_act_bytes(cnt, E) + 63) & ~(size_t) 63;
                     }
@@ -3697,7 +3973,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         const void* pa = pk + off_a[(size_t) j];
                         kc::kq_rows_packed(nf.gu_type, blob + (size_t) r0 * nf.gu_row, nf.gu_row, E, pa, cnt, go.data(), 0,
                                            kGu);
-                        kc::kq_rows_packed(nf.gu_type, blob + Ly.gu_bytes + (size_t) r0 * nf.gu_row, nf.gu_row, E, pa,
+                        kc::kq_rows_packed(nf.up_type >= 0 ? nf.up_type : nf.gu_type,
+                                           blob + Ly.gu_bytes + (size_t) r0 * (nf.up_row ? nf.up_row : nf.gu_row),
+                                           nf.up_row ? nf.up_row : nf.gu_row, E, pa,
                                            cnt, uo.data(), 0, kGu);
                         const float lim = g.swiglu_exp;
                         for (int t = 0; t < cnt; ++t) {
@@ -3843,6 +4121,36 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         flush();
         if (cpu_nrows > 0)
             gb::moe_combine_add(M.OUTPc, cpu_r0, cpu_r0, cpu_r0 + cpu_nrows, M.pos, M.rw, T, K, E, S->ffn, s);
+        if (net_nrows > 0) {
+            net_th.join();
+            if (!net_ok) {
+                F->helper_failed.store(true, std::memory_order_release);
+                err = net_err.empty() ? "glm prefill: a net helper's prompt rows failed" : net_err;
+                return false;
+            }
+            cudaEvent_t ev_net = nullptr;
+            cudaEventCreateWithFlags(&ev_net, cudaEventDisableTiming);
+            if (net_tok) {   // the tokens' sums into the window's last T rows, added into ffn
+                float* const net_sum = M.OUTPc + (size_t) (moe_window_rows((size_t) T, g) - T) * E;
+                cudaMemcpyAsync(net_sum, S->net_h[net_par], (size_t) T * E * sizeof(float), cudaMemcpyHostToDevice,
+                                F->copy);
+                cudaEventRecord(ev_net, F->copy);
+                cudaEventRecord(S->net_ev[net_par], F->copy);
+                cudaStreamWaitEvent(s, ev_net, 0);
+                const int64_t n = (int64_t) T * E;
+                add_f32_kernel<<<(unsigned) std::min<int64_t>(4096, (n + 255) / 256), 256, 0, s>>>(S->ffn, net_sum, n);
+            } else {
+                cudaMemcpyAsync(M.OUTPc + (size_t) cpu_nrows * E, S->out_h + (size_t) cpu_nrows * E,
+                                (size_t) net_nrows * E * sizeof(float), cudaMemcpyHostToDevice, F->copy);
+                cudaEventRecord(ev_net, F->copy);
+                cudaStreamWaitEvent(s, ev_net, 0);
+                gb::moe_combine_add(M.OUTPc, cpu_r0, net_r0, net_r0 + net_nrows, M.pos, M.rw, T, K, E, S->ffn, s);
+            }
+            cudaEventDestroy(ev_net);
+            S->net_rows += (uint64_t) net_nrows;
+            S->net_experts += (uint64_t) net_set.size();
+            S->ms_net += net_ms;
+        }
         S->mark("combine", s);
         if (calc_run) {
             cudaStreamWaitEvent(s, S->ev_cpart, 0);
@@ -4087,6 +4395,15 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                       S->ct_disk_ms, S->ct_hop_in, lmax, lmin < 1e30 ? lmin : 0.0,
                       S->sev_layer.empty() ? " (no staged groups)" : "");
         std::fprintf(stderr, "%s", line);
+        if (S->net_rows > 0) {   // (cumulative since the engine started)
+            std::fprintf(stderr, "glm prefill: CUDA%d net helpers so far: %llu experts, %llu rows, %.0f ms (their thread, "
+                                 "overlapping the copies)\n", dev_, (unsigned long long) S->net_experts,
+                         (unsigned long long) S->net_rows, S->ms_net);
+            for (const auto& nh : F->net)
+                std::fprintf(stderr, "glm prefill:   %s: %llu rows in %llu layers, sending %.0f ms, waiting %.0f ms\n",
+                             nh->name().c_str(), (unsigned long long) nh->pf_rows, (unsigned long long) nh->pf_layers,
+                             nh->pf_ms_send, nh->pf_ms_wait);
+        }
         S->pr_wall += std::max(0.0, wall);
         S->pr_hop += S->ct_hop_in;
         S->ct_vram = S->ct_ram = S->ct_disk = S->ct_res = S->ct_res_r = S->ct_staged = S->ct_pre = 0;

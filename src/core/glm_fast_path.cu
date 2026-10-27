@@ -89,6 +89,26 @@ static __global__ void glm_link_wake(unsigned long long ns) {
 #endif
 }
 
+namespace {
+// the helper routes' host time, token routes vs a verify window's (rq->win_n > 1): the local helper GPU, the CPU
+// experts, the net helpers' answers (finish, or a held window's flush), and the routes themselves (printed at close)
+struct RouteClock {
+    std::atomic<uint64_t> n{0}, local_us{0}, cpu_us{0}, net_us{0}, total_us{0}, flushes{0};
+};
+RouteClock g_rc_tok, g_rc_win;
+// STRATA_GLM_NET_TRACE: a token route's times with the helpers, device (route -> moe_cpu_wait start / end) and host
+// (seen -> net requests sent -> local helper -> CPU experts -> each net answer -> published), summed over routes
+struct NetTrace {
+    uint64_t n = 0, n_cls[4] = {}, last0 = 0, last1 = 0, waited = 0;
+    double g_work = 0, g_lat = 0, g_wait = 0, h_book = 0, h_send = 0, h_loc = 0, h_cpu = 0, h_f0 = 0, h_f1 = 0,
+           h_tot = 0, w_cls[4] = {}, f0_n = 0, f1_n = 0, g_pub = 0, gw_cls[4] = {}, gl_cls[4] = {}, ht_cls[4] = {};
+};
+NetTrace g_nt;
+inline int64_t nt_now() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
 namespace strata::core {
 
 using glmfast::cpu_relax;
@@ -785,6 +805,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 Ly.exl3 = true;
                 Ly.gu_type = Ly.d_type = strata::kernels::exl3::kTypeEXL3;
                 Ly.gu_bytes = nl.x_part(0);
+                Ly.up_bytes = Ly.gu_bytes;
                 Ly.dn_bytes = nl.x_part(2);
                 Ly.down_off = 2 * Ly.gu_bytes;
                 Ly.blob = 2 * Ly.gu_bytes + Ly.dn_bytes;
@@ -797,14 +818,16 @@ bool Glm5Model::fast_setup(std::string& err) {
                     Ly.xl.k2[r] = nl.x_k2[r];
                 }
             } else {
-                Ly.gu_type = nl.fmt.gu_type;
+                Ly.gu_type = strata::kernels::gu_code(nl.fmt.gu_type, nl.fmt.up_type);
                 Ly.d_type = nl.fmt.d_type;
                 Ly.gu_bytes = (size_t) nl.fmt.gu_row * (size_t) g.n_ff_exp;
+                Ly.up_bytes = (size_t) (nl.fmt.up_row ? nl.fmt.up_row : nl.fmt.gu_row) * (size_t) g.n_ff_exp;
                 Ly.dn_bytes = (size_t) nl.fmt.d_row * (size_t) g.n_embd;
-                Ly.down_off = 2 * Ly.gu_bytes;
-                Ly.blob = 2 * Ly.gu_bytes + Ly.dn_bytes;
+                Ly.down_off = Ly.gu_bytes + Ly.up_bytes;
+                Ly.blob = Ly.down_off + Ly.dn_bytes;
                 if (!gf::moe_supported(Ly.gu_type) || !gf::moe_supported(Ly.d_type) ||
-                    gf::row_bytes(Ly.gu_type, g.n_embd) != nl.fmt.gu_row ||
+                    gf::row_bytes(strata::kernels::gu_gate(Ly.gu_type), g.n_embd) != nl.fmt.gu_row ||
+                    (size_t) gf::row_bytes(strata::kernels::gu_up(Ly.gu_type), g.n_embd) * (size_t) g.n_ff_exp != Ly.up_bytes ||
                     gf::row_bytes(Ly.d_type, g.n_ff_exp) != nl.fmt.d_row)
                     missing += P + "expert types " + std::to_string(Ly.gu_type) + "/" + std::to_string(Ly.d_type) + " ";
             }
@@ -944,6 +967,14 @@ bool Glm5Model::fast_setup(std::string& err) {
     F->resp_h = (gf::MoeResponse*) hp;
     cudaHostGetDevicePointer(&dp, hp, 0);
     F->md.resp = dp;
+    if (getenv("STRATA_GLM_NET_TRACE") != nullptr &&
+        cudaHostAlloc(&hp, sizeof(unsigned long long) * 8 * gf::kTlog, cudaHostAllocMapped) == cudaSuccess) {
+        std::memset(hp, 0, sizeof(unsigned long long) * 8 * gf::kTlog);
+        F->tlog_h = (unsigned long long*) hp;
+        cudaHostGetDevicePointer(&dp, hp, 0);
+        F->md.tlog = (unsigned long long*) dp;
+        F->htlog.assign((size_t) gf::kTlog, FastState::HostT{});
+    }
     if (cudaHostAlloc((void**) &F->emb_h, (size_t) E * sizeof(float), cudaHostAllocDefault) != cudaSuccess ||
         cudaHostAlloc((void**) &F->hop_h, (size_t) g.hc * E * sizeof(float), cudaHostAllocDefault) != cudaSuccess ||
         cudaHostAlloc((void**) &F->tok_h, 64, cudaHostAllocDefault) != cudaSuccess) {
@@ -1836,6 +1867,20 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
     F->lane_pending = false;
     cudaSetDevice(dev_);
     if (!fast_cpu_lane_setup(err)) return false;   // keep the existing CPU pool/calibration for batched prefill
+    // the admission bar's route counts (STRATA_GLM_PROMOTE_MIN > 1) without the CPU lane: the lane setup allocates them
+    // only for its own plan - without them every count reads 0 and a bar above 1 refused every promotion
+    if (const char* pm = getenv("STRATA_GLM_PROMOTE_MIN"); pm != nullptr && std::atoi(pm) > 1 && F->dcnt_d == nullptr &&
+        F->cnt.size() == (size_t) F->n_keys) {
+        if (cudaMalloc((void**) &F->dcnt_d, (size_t) F->n_keys * sizeof(unsigned int)) != cudaSuccess) {
+            err = "glm fast: the admission bar's route counts did not allocate";
+            return false;
+        }
+        upload_staged(F->stage.empty() ? nullptr : F->stage[0], F->stage_bytes, F->dcnt_d, F->cnt.data(),
+                      (size_t) F->n_keys * sizeof(unsigned int));
+        F->md.dcnt = F->dcnt_d;
+        std::fprintf(stderr, "glm fast: CUDA%d route counts for the admission bar (STRATA_GLM_PROMOTE_MIN=%d, no CPU lane)\n",
+                     dev_, std::atoi(pm));
+    }
     if (const char* h = getenv("STRATA_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
@@ -1885,8 +1930,341 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         if (F->helper.integrated()) R.st[(size_t) rs] = FastState::kRHelper;
         ++resident;
     }
+    if (const char* nh = getenv("STRATA_GLM_NET_HELPER"); nh != nullptr && nh[0] != '\0') {
+        if (F->helper.integrated()) {
+            err = "GLM net helper: needs a discrete local helper GPU";
+            return false;
+        }
+        std::vector<std::string> shards;
+        for (const auto& s : pack_shards_) shards.push_back(s.path);
+        F->net_of.assign((size_t) F->n_keys, 0);
+        const std::string spec = nh;
+        for (size_t at = 0; at < spec.size();) {
+            const size_t comma = spec.find(',', at);
+            const std::string hp = spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            at = comma == std::string::npos ? spec.size() : comma + 1;
+            if (hp.empty()) continue;
+            if (F->net.size() >= 4) {
+                err = "GLM net helper: four at most";
+                return false;
+            }
+            size_t left = 0;
+            for (int key : ranked)
+                if (!F->aux_owns(key)) left += F->rc[(size_t) F->layer_rc[(size_t) (key / g_.n_expert)]].stride;
+            // STRATA_GLM_NET_HELPER_GIB: at most this much a net helper (a quick start, or room left on its GPU)
+            if (const char* cap = getenv("STRATA_GLM_NET_HELPER_GIB"); cap != nullptr && std::atof(cap) > 0)
+                left = std::min(left, (size_t) (std::atof(cap) * 1073741824.0));
+            auto h = std::make_unique<GlmNetHelper>();
+            if (!h->connect(hp, err) || !h->open(g_.n_embd, g_.n_ff_exp, shards, err) ||
+                !h->reserve(F->n_keys, left, err)) return false;
+            // the helper reads its experts from its own copy of the pack when it has one; else they go over the wire
+            const bool from_file = h->missing() == 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int key : ranked) {
+                if (F->aux_owns(key)) continue;
+                const int il = key / g_.n_expert, e = key % g_.n_expert;
+                auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+                if (R.stride > h->available()) continue;
+                const auto& Ly = F->L[(size_t) il];
+                bool ok;
+                if (from_file) {
+                    const auto& nl = pack_layers_[(size_t) il];
+                    const uint32_t sh[3] = {(uint32_t) nl.gate_shard, (uint32_t) nl.up_shard, (uint32_t) nl.down_shard};
+                    const uint64_t off[3] = {nl.gate_off + (uint64_t) e * Ly.gu_bytes, nl.up_off + (uint64_t) e * Ly.up_bytes,
+                                             nl.down_off + (uint64_t) e * Ly.dn_bytes};
+                    const uint64_t len[3] = {(uint64_t) Ly.gu_bytes, (uint64_t) Ly.up_bytes, (uint64_t) Ly.dn_bytes};
+                    const uint64_t dst[3] = {0, (uint64_t) Ly.gu_bytes, (uint64_t) Ly.down_off};
+                    ok = h->insert_file(key, sh, off, len, dst, Ly.blob, R.stride, err);
+                } else {
+                    const int rs = F->ram_of[(size_t) key];
+                    const uint8_t* host = rs >= 0 ? R.base + (size_t) rs * R.stride : F->stage[0];
+                    if (rs < 0) for (int role = 0; role < 3; ++role) fast_read_part(il, e, role, F->stage[0], 0, 1);
+                    ok = h->insert(key, host, Ly.blob, R.stride, err);
+                }
+                if (!ok) return false;
+                F->net_of[(size_t) key] = (uint8_t) (F->net.size() + 1);
+            }
+            if (!h->flush(err)) return false;
+            std::fprintf(stderr, "glm net helper: %s owns %d more experts in %.2f GiB (%s, %.1f s)\n", hp.c_str(),
+                         h->resident(), (double) h->used() / 1073741824.0,
+                         from_file ? "read from its own pack copy" : "sent over the network",
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            F->net.push_back(std::move(h));
+        }
+        // the net helpers' experts leave the RAM tier: decode never reads them there (a helper answers for them),
+        // prefill reads them like any other expert off the tier; the slots take the next experts by usage, which
+        // the decode would otherwise read from disk.  STRATA_GLM_NET_KEEP_RAM=1: keep them.
+        if (!F->net.empty() && getenv("STRATA_GLM_NET_KEEP_RAM") == nullptr) {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<std::vector<int>> freed(F->rc.size());
+            const unsigned long long zero = 0;
+            for (int key = 0; key < F->n_keys; ++key) {
+                if (F->net_of[(size_t) key] == 0) continue;
+                const int rs = F->ram_of[(size_t) key];
+                if (rs < 0) continue;
+                const int c = F->layer_rc[(size_t) (key / g_.n_expert)];
+                auto& R = F->rc[(size_t) c];
+                if (R.st[(size_t) rs] != FastState::kRHold) continue;
+                R.st[(size_t) rs] = FastState::kRFree;
+                R.key[(size_t) rs] = -1;
+                F->ram_of[(size_t) key] = -1;
+                if (!glmfast::cuda_ok(cudaMemcpy(F->tab + F->rtab_key(key), &zero, sizeof(zero), cudaMemcpyHostToDevice),
+                                     "net helper RAM release", err)) return false;
+                freed[(size_t) c].push_back(rs);
+            }
+            size_t n_freed = 0;
+            for (const auto& v : freed) n_freed += v.size();
+            std::vector<int> cand;
+            for (int il = l0_; il < lt_; ++il) {
+                if (!F->L[(size_t) il].moe || F->layer_rc[(size_t) il] < 0) continue;
+                for (int e = 0; e < g_.n_expert; ++e) {
+                    const int key = il * g_.n_expert + e;
+                    if (F->slot_of[(size_t) key] < 0 && F->ram_of[(size_t) key] < 0 && !F->aux_owns(key))
+                        cand.push_back(key);
+                }
+            }
+            std::stable_sort(cand.begin(), cand.end(), [&](int a, int b) { return F->usage[(size_t) a] > F->usage[(size_t) b]; });
+            struct Fill { int key, slot; uint8_t* dst; };
+            std::vector<Fill> fills;
+            for (int key : cand) {
+                const int c = F->layer_rc[(size_t) (key / g_.n_expert)];
+                auto& v = freed[(size_t) c];
+                if (v.empty()) continue;
+                auto& R = F->rc[(size_t) c];
+                fills.push_back(Fill{key, v.back(), R.base + (size_t) v.back() * R.stride});
+                v.pop_back();
+            }
+            for (size_t b = 0; b < fills.size(); b += 8) {
+                const int nb = (int) std::min<size_t>(8, fills.size() - b);
+                F->workers->run(nb * 3, [&](int job) {
+                    const Fill& f = fills[b + (size_t) (job / 3)];
+                    fast_read_part(f.key / g_.n_expert, f.key % g_.n_expert, job % 3, f.dst, 0, 1);
+                });
+            }
+            for (const Fill& f : fills) {
+                auto& R = F->rc[(size_t) F->layer_rc[(size_t) (f.key / g_.n_expert)]];
+                R.key[(size_t) f.slot] = f.key;
+                R.st[(size_t) f.slot] = FastState::kRHold;
+                R.tick[(size_t) f.slot] = F->clock;
+                F->ram_of[(size_t) f.key] = f.slot;
+                const unsigned long long ptr = (unsigned long long) f.dst;
+                if (!glmfast::cuda_ok(cudaMemcpy(F->tab + F->rtab_key(f.key), &ptr, sizeof(ptr), cudaMemcpyHostToDevice),
+                                     "net helper RAM refill", err)) return false;
+            }
+            std::fprintf(stderr, "glm net helper: %zu RAM slots released from the helpers' experts, %zu refilled "
+                                 "with the next experts by usage (%.1f s)\n", n_freed, fills.size(),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+        // THE COLD SHARE: what every tier above still leaves on the disk - no VRAM slot, no RAM-tier slot, no helper -
+        // goes to the net helpers' RAM tiers (maya-helperd --ram-cold: their CPUs compute it), the most used first.
+        // The trunk's own tiers keep everything they held (the 5090's cache promotes from its RAM tier as before); a
+        // decode route that picks one of these asks its helper instead of reading the disk.  STRATA_GLM_NET_COLD=0: off
+        static const bool cold_on = [] {
+            const char* v = getenv("STRATA_GLM_NET_COLD");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        bool any_ram = false;
+        for (const auto& h : F->net) any_ram = any_ram || (h->ram_available() > 0 && h->missing() == 0);
+        if (cold_on && any_ram) {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<int> cold;
+            size_t cold_bytes = 0;
+            for (int il = l0_; il < lt_; ++il) {
+                if (!F->L[(size_t) il].moe || F->layer_rc[(size_t) il] < 0) continue;
+                const size_t stride = F->rc[(size_t) F->layer_rc[(size_t) il]].stride;
+                for (int e = 0; e < g_.n_expert; ++e) {
+                    const int key = il * g_.n_expert + e;
+                    if (F->slot_of[(size_t) key] < 0 && F->ram_of[(size_t) key] < 0 && !F->aux_owns(key)) {
+                        cold.push_back(key);
+                        cold_bytes += stride;
+                    }
+                }
+            }
+            std::stable_sort(cold.begin(), cold.end(), [&](int a, int b) { return F->usage[(size_t) a] > F->usage[(size_t) b]; });
+            size_t placed = 0, placed_bytes = 0;
+            for (size_t j = 0; j < F->net.size(); ++j) {
+                auto& h = *F->net[j];
+                if (h.ram_available() == 0 || h.missing() != 0) continue;
+                const int before = h.resident_ram();
+                for (int key : cold) {
+                    if (F->aux_owns(key)) continue;
+                    const int il = key / g_.n_expert, e = key % g_.n_expert;
+                    const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+                    if (R.stride > h.ram_available()) continue;
+                    const auto& Ly = F->L[(size_t) il];
+                    const auto& nl = pack_layers_[(size_t) il];
+                    const uint32_t sh[3] = {(uint32_t) nl.gate_shard, (uint32_t) nl.up_shard, (uint32_t) nl.down_shard};
+                    const uint64_t off[3] = {nl.gate_off + (uint64_t) e * Ly.gu_bytes, nl.up_off + (uint64_t) e * Ly.up_bytes,
+                                             nl.down_off + (uint64_t) e * Ly.dn_bytes};
+                    const uint64_t len[3] = {(uint64_t) Ly.gu_bytes, (uint64_t) Ly.up_bytes, (uint64_t) Ly.dn_bytes};
+                    const uint64_t dst[3] = {0, (uint64_t) Ly.gu_bytes, (uint64_t) Ly.down_off};
+                    if (!h.insert_file_ram(key, sh, off, len, dst, Ly.blob, R.stride, err)) return false;
+                    F->net_of[(size_t) key] = (uint8_t) (j + 1);
+                    ++placed;
+                    placed_bytes += R.stride;
+                }
+                if (!h.flush(err)) return false;
+                std::fprintf(stderr, "glm net helper: %s holds %d cold experts in its RAM tier (%.2f GiB, its CPU computes "
+                                     "them)\n", h.name().c_str(), h.resident_ram() - before,
+                             (double) h.ram_used() / 1073741824.0);
+            }
+            std::fprintf(stderr, "glm net helper: the cold share - %zu experts (%.2f GiB) were left to the disk, %zu "
+                                 "(%.2f GiB) now on a helper's RAM tier, %zu (%.2f GiB) still on the disk (%.1f s)\n",
+                         cold.size(), (double) cold_bytes / 1073741824.0, placed, (double) placed_bytes / 1073741824.0,
+                         cold.size() - placed, (double) (cold_bytes - placed_bytes) / 1073741824.0,
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+        // THE COPY SHARE (STRATA_GLM_NET_COPY=<n>: the n-th net helper; STRATA_GLM_NET_COPY_GB=<GB> caps it): copies of
+        // the trunk's own RAM-tier experts in that helper's RAM tier, the least used first (the CPU lane takes a route's
+        // coldest RAM-tier experts; the most used are the 5090's next promotions).  Nothing else changes - the trunk's
+        // tiers, promotions and net_of keep them (pilot A, 10-25: warm experts the helper OWNED starved the 5090's
+        // cache) - but a route's CPU-lane experts with a copy there can go to that helper's CPU in the route's request
+        // instead of this CPU (copy_r).  STRATA_GLM_NET_COPY_LOCAL=0: none on this CPU while a copy exists
+        const char* cpv = getenv("STRATA_GLM_NET_COPY");
+        const int copy_j = cpv != nullptr ? std::atoi(cpv) : 0;
+        if (copy_j >= 1 && copy_j <= (int) F->net.size() && F->cpu_plan != 0ull && F->cpu_pool != nullptr) {
+            namespace npc = strata::core::netproto;
+            const auto t0 = std::chrono::steady_clock::now();
+            auto& h = *F->net[(size_t) copy_j - 1];
+            const char* gv = getenv("STRATA_GLM_NET_COPY_GB");
+            const double budget = gv != nullptr ? std::atof(gv) * 1e9 : 1e18;
+            std::vector<int> keys;
+            size_t tier = 0;
+            for (int il = l0_; il < lt_; ++il) {
+                if (!F->L[(size_t) il].moe || F->layer_rc[(size_t) il] < 0 || F->cpu_fmt[(size_t) il].n_ff <= 0) continue;
+                for (int e = 0; e < g_.n_expert; ++e) {
+                    const int key = il * g_.n_expert + e;
+                    if (F->ram_of[(size_t) key] < 0) continue;
+                    ++tier;
+                    if (F->slot_of[(size_t) key] < 0 && !F->aux_owns(key)) keys.push_back(key);
+                }
+            }
+            std::stable_sort(keys.begin(), keys.end(), [&](int a, int b) { return F->usage[(size_t) a] < F->usage[(size_t) b]; });
+            F->copy_of.assign((size_t) F->n_keys, 0);
+            F->copy_refs.clear();
+            double bytes = 0.0;
+            for (int key : keys) {
+                const int il = key / g_.n_expert, e = key % g_.n_expert;
+                const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+                if (bytes + (double) R.stride > budget || R.stride > h.ram_available()) break;
+                const auto& Ly = F->L[(size_t) il];
+                const auto& nl = pack_layers_[(size_t) il];
+                const uint32_t sh[3] = {(uint32_t) nl.gate_shard, (uint32_t) nl.up_shard, (uint32_t) nl.down_shard};
+                const uint64_t off[3] = {nl.gate_off + (uint64_t) e * Ly.gu_bytes, nl.up_off + (uint64_t) e * Ly.up_bytes,
+                                         nl.down_off + (uint64_t) e * Ly.dn_bytes};
+                const uint64_t len[3] = {(uint64_t) Ly.gu_bytes, (uint64_t) Ly.up_bytes, (uint64_t) Ly.dn_bytes};
+                const uint64_t dst[3] = {0, (uint64_t) Ly.gu_bytes, (uint64_t) Ly.down_off};
+                if (!h.insert_file_ram(key, sh, off, len, dst, Ly.blob, R.stride, err)) return false;
+                F->copy_of[(size_t) key] = (uint8_t) copy_j;
+                npc::HashRef r{};
+                r.key = key;
+                for (int j = 0; j < 3; ++j) r.dst[j] = dst[j], r.len[j] = len[j];
+                F->copy_refs.push_back(r);
+                bytes += (double) R.stride;
+            }
+            if (!h.flush(err)) return false;
+            const double t_load = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            // the check: every copy's hash there against this trunk's RAM-tier blob (sekai-pc's 128 GB ran unstable at
+            // one SoC voltage, 10-26: a flipped bit there would be a silently wrong expert)
+            const auto t1 = std::chrono::steady_clock::now();
+            const size_t n = F->copy_refs.size();
+            F->copy_hash.assign(n, 0);
+            {
+                std::atomic<size_t> next{0};
+                std::vector<std::thread> th;
+                for (int t = 0; t < 8; ++t)
+                    th.emplace_back([&] {
+                        for (size_t i; (i = next.fetch_add(1)) < n;) {
+                            const npc::HashRef& r = F->copy_refs[i];
+                            const int il = r.key / g_.n_expert;
+                            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+                            F->copy_hash[i] = npc::blob_hash(R.base + (size_t) F->ram_of[(size_t) r.key] * R.stride, r.dst, r.len);
+                        }
+                    });
+                for (auto& t : th) t.join();
+            }
+            std::vector<uint64_t> there(n, 0);
+            for (size_t at = 0; at < n; at += 1024)
+                if (!h.hash_ram((int) std::min<size_t>(1024, n - at), F->copy_refs.data() + at, there.data() + at, err))
+                    return false;
+            size_t bad = 0;
+            for (size_t i = 0; i < n; ++i)
+                if (there[i] != F->copy_hash[i]) {
+                    if (bad < 8)
+                        std::fprintf(stderr, "glm net copy: key %d (layer %d expert %d) differs on %s: %016llx vs %016llx\n",
+                                     F->copy_refs[i].key, F->copy_refs[i].key / g_.n_expert, F->copy_refs[i].key % g_.n_expert,
+                                     h.name().c_str(), (unsigned long long) there[i], (unsigned long long) F->copy_hash[i]);
+                    ++bad;
+                }
+            const double t_check = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+            std::fprintf(stderr, "glm net copy: %s holds copies of %zu of the trunk's %zu RAM-tier experts (%.2f GB, read "
+                                 "from its pack copy in %.1f s); check: %zu of %zu hashes match (%.1f s)\n",
+                         h.name().c_str(), n, tier, bytes / 1e9, t_load, n - bad, n, t_check);
+            if (bad > 0) {
+                err = "GLM net copy: " + std::to_string(bad) + " of " + std::to_string(n) + " copies on " + h.name() +
+                      " differ from the trunk's experts (its RAM, or its pack copy)";
+                return false;
+            }
+            // the split: of a route's k CPU-lane experts, c of them with a copy, the r there minimise
+            // max(this CPU's k - r, the round trip + r there) - a route that asks that helper anyway has its trip already
+            const auto envd = [](const char* name, double d) {
+                const char* v = getenv(name);
+                return v != nullptr && v[0] != '\0' ? std::atof(v) : d;
+            };
+            const char* lcv = getenv("STRATA_GLM_NET_COPY_LOCAL");
+            const bool local = lcv == nullptr || std::atoi(lcv) != 0;
+            const double cl = local ? F->cpu_c_ms : 1e9, p = F->cpu_p_ms;
+            const double cr = envd("STRATA_GLM_NET_COPY_MS", 0.28), rtt = envd("STRATA_GLM_NET_COPY_RTT", 0.35),
+                         rtt_s = envd("STRATA_GLM_NET_COPY_RTT_SHARED", 0.10);
+            const auto split = [&](int k, int c, double rt, int& rb) {
+                double best = 1e18;
+                rb = 0;
+                for (int r = 0; r <= c; ++r) {
+                    const double t = std::max(k - r > 0 ? 0.04 + cl * (k - r) : 0.0, r > 0 ? rt + cr * r : 0.0);
+                    if (t < best - 1e-9) best = t, rb = r;
+                }
+                return best;
+            };
+            for (int k = 0; k <= 8; ++k)
+                for (int c = 0; c <= k; ++c)
+                    for (int s = 0; s < 2; ++s) {
+                        int rb = 0;
+                        split(k, c, s ? rtt_s : rtt, rb);
+                        F->copy_r[k][c][s] = (uint8_t) rb;
+                    }
+            // ... and the lane's plan again: of f RAM-tier experts the k off the GPU, with the copies as a third lane
+            // (STRATA_GLM_NET_COPY_PLAN=<digits for f = 0..8> overrides)
+            unsigned long long plan = 0;
+            std::string tab;
+            const char* ppv = getenv("STRATA_GLM_NET_COPY_PLAN");
+            for (int f = 0; f <= 8; ++f) {
+                int k = 0;
+                if (ppv != nullptr && ppv[0] != '\0') {
+                    k = f < (int) std::strlen(ppv) ? std::max(0, std::min(f, ppv[f] - '0')) : 0;
+                } else {
+                    double best = p * f;
+                    for (int kk = 1; kk <= f; ++kk) {
+                        int rb = 0;
+                        const double t = std::max(p * (f - kk), split(kk, kk, rtt, rb));
+                        if (t < best - 1e-9) best = t, k = kk;
+                    }
+                }
+                plan |= (unsigned long long) k << (4 * f);
+                tab += " " + std::to_string(k);
+            }
+            if (plan != 0ull) F->cpu_plan = F->cpu_plan_start = plan;
+            F->cpu_retime = false;
+            F->copy_j = copy_j;
+            std::string rt;
+            for (int k = 1; k <= 8; ++k) rt += " " + std::to_string(F->copy_r[k][k][0]) + "/" + std::to_string(F->copy_r[k][k][1]);
+            std::fprintf(stderr, "glm net copy: a copy there %.3f ms + %.3f ms a trip (%.3f with the route's own request), "
+                                 "here %.3f ms, PCIe %.3f -> of 0..8 RAM-tier experts off the GPU%s; of k = 1..8 all with "
+                                 "a copy, there (trip / shared trip)%s\n",
+                         cr, rtt, rtt_s, local ? cl : 0.0, p, tab.c_str(), rt.c_str());
+        }
+    }
     if (!glmfast::cuda_ok(cudaMalloc((void**) &F->helper_owned_d, (size_t) F->n_keys), "GLM helper ownership", err) ||
-        !glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->helper.owners().data(), (size_t) F->n_keys,
+        !glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(), (size_t) F->n_keys,
                                     cudaMemcpyHostToDevice), "GLM helper ownership upload", err)) return false;
     F->md.helper_owned = F->helper_owned_d;
     win_lanes_stop();   // verify-window requests use the helper too, not the optional CPU window lanes
@@ -1934,6 +2312,7 @@ bool Glm5Model::fast_helper_adapt(std::string& err) {
     }
     const auto swaps = F->helper.swaps(F->cnt, primary, g_.n_expert, 8);
     for (const auto& s : swaps) {
+        if (!F->net_of.empty() && F->net_of[(size_t) s.in] != 0) continue;   // already on a net helper
         const int il = s.in / g_.n_expert;
         auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
         const int rs = F->ram_of[(size_t) s.in];
@@ -1959,7 +2338,7 @@ bool Glm5Model::fast_helper_adapt(std::string& err) {
         }
         ++F->helper_swaps;
     }
-    return swaps.empty() || glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->helper.owners().data(),
+    return swaps.empty() || glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(),
                          (size_t) F->n_keys, cudaMemcpyHostToDevice), "helper adapted ownership", err);
 }
 
@@ -2580,7 +2959,9 @@ void Glm5Model::fast_cpu_experts(int il, int ne, const uint8_t* const* blob, con
     if (verify && !Ly.exl3) {
         static double e2 = 0, n2 = 0, worst = 0;
         static int calls = 0;
-        const ggml_type_traits* tg = ggml_get_type_traits((ggml_type) Ly.gu_type);
+        const ggml_type_traits* tg = ggml_get_type_traits((ggml_type) nf.gu_type);
+        const ggml_type_traits* tu = ggml_get_type_traits((ggml_type) strata::kernels::gu_up(Ly.gu_type));
+        const size_t urow = nf.up_row ? nf.up_row : nf.gu_row;
         const ggml_type_traits* td = ggml_get_type_traits((ggml_type) Ly.d_type);
         std::vector<float> row((size_t) std::max(n_embd, n_ff));
         std::vector<double> hr((size_t) n_ff), ref((size_t) n_embd, 0.0);
@@ -2590,7 +2971,7 @@ void Glm5Model::fast_cpu_experts(int il, int ne, const uint8_t* const* blob, con
                 double gs = 0.0, us = 0.0;
                 tg->to_float(blob[i] + (size_t) r * nf.gu_row, row.data(), n_embd);
                 for (int c = 0; c < n_embd; ++c) gs += (double) row[(size_t) c] * x[c];
-                tg->to_float(blob[i] + Ly.gu_bytes + (size_t) r * nf.gu_row, row.data(), n_embd);
+                tu->to_float(blob[i] + Ly.gu_bytes + (size_t) r * urow, row.data(), n_embd);
                 for (int c = 0; c < n_embd; ++c) us += (double) row[(size_t) c] * x[c];
                 gs = std::min(gs, lim);
                 us = std::min(std::max(us, -lim), lim);
@@ -3201,7 +3582,9 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
         cudaStreamSynchronize(F->cs);
         fast_cpu_experts(il_cal, 1, &cal, &one, xc.data(), oc.data());
         // the reference: rows dequantised by ggml, dots in double
-        const ggml_type_traits* tg = ggml_get_type_traits((ggml_type) Ly.gu_type);
+        const ggml_type_traits* tg = ggml_get_type_traits((ggml_type) nf.gu_type);
+        const ggml_type_traits* tu = ggml_get_type_traits((ggml_type) strata::kernels::gu_up(Ly.gu_type));
+        const size_t urow = nf.up_row ? nf.up_row : nf.gu_row;
         const ggml_type_traits* td = ggml_get_type_traits((ggml_type) Ly.d_type);
         std::vector<float> row((size_t) std::max(E, FFE));
         std::vector<double> hr((size_t) FFE), orf((size_t) E);
@@ -3209,7 +3592,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
             double gs = 0.0, us = 0.0;
             tg->to_float(cal + (size_t) r * nf.gu_row, row.data(), E);
             for (int i = 0; i < E; ++i) gs += (double) row[(size_t) i] * xc[(size_t) i];
-            tg->to_float(cal + Ly.gu_bytes + (size_t) r * nf.gu_row, row.data(), E);
+            tu->to_float(cal + Ly.gu_bytes + (size_t) r * urow, row.data(), E);
             for (int i = 0; i < E; ++i) us += (double) row[(size_t) i] * xc[(size_t) i];
             const double lim = g.swiglu_exp;
             gs = std::min(gs, lim);
@@ -3548,11 +3931,11 @@ bool Glm5Model::fast_warm(std::string& err) {
             }
             const Shard& sh = pack_shards_[(size_t) (role == 0 ? nl.gate_shard : role == 1 ? nl.up_shard : nl.down_shard)];
             const uint64_t off = role == 0   ? nl.gate_off + (uint64_t) J.e * Ly.gu_bytes
-                                 : role == 1 ? nl.up_off + (uint64_t) J.e * Ly.gu_bytes
+                                 : role == 1 ? nl.up_off + (uint64_t) J.e * Ly.up_bytes
                                              : nl.down_off + (uint64_t) J.e * Ly.dn_bytes;
-            const size_t len = role == 2 ? Ly.dn_bytes : Ly.gu_bytes;
+            const size_t len = role == 2 ? Ly.dn_bytes : role == 1 ? Ly.up_bytes : Ly.gu_bytes;
             uint8_t* base = J.vram ? F->stage[(size_t) (job / 3)] : J.dst;
-            uint8_t* d = base + (role == 0 ? 0 : role == 1 ? Ly.gu_bytes : 2 * Ly.gu_bytes);
+            uint8_t* d = base + (role == 0 ? 0 : role == 1 ? Ly.gu_bytes : Ly.down_off);
             read_slice(sh, off, len, d);
         });
         for (int k = 0; k < nb; ++k) {
@@ -3597,6 +3980,16 @@ void Glm5Model::fast_destroy() {
     }
     F->ah_cv.notify_all();
     for (auto& t : F->ah_th) t.join();
+    {
+        std::lock_guard<std::mutex> lq(F->pre_mu);
+        F->pre_quit = true;
+    }
+    F->pre_cv.notify_all();
+    if (F->pre_th.joinable()) F->pre_th.join();
+    if (F->pre_claimed > 0)
+        std::fprintf(stderr, "glm fast: drop preload: %llu claimed, %llu landed, %llu discarded, %llu cancelled\n",
+                     (unsigned long long) F->pre_claimed, (unsigned long long) F->pre_landed,
+                     (unsigned long long) F->pre_discard, (unsigned long long) F->pre_cancelled);
     F->workers.reset();
     win_lanes_stop();   // (after the service thread: it hands them their routes)
     F->cpu_pool.reset();
@@ -3606,6 +3999,63 @@ void Glm5Model::fast_destroy() {
                      (double) F->helper_us.load() / 1000.0, (unsigned long long) F->helper_swaps);
         F->helper.close();
     }
+    for (const auto* rc : {&g_rc_tok, &g_rc_win}) {
+        const uint64_t n = rc->n.load();
+        if (n == 0) continue;
+        std::fprintf(stderr, "glm helper routes (%s): %llu routes, per route local GPU %.3f ms, CPU %.3f ms, net answers "
+                             "%.3f ms, total %.3f ms%s\n", rc == &g_rc_tok ? "tokens" : "verify windows",
+                     (unsigned long long) n, rc->local_us.load() / 1000.0 / n, rc->cpu_us.load() / 1000.0 / n,
+                     rc->net_us.load() / 1000.0 / n, rc->total_us.load() / 1000.0 / n,
+                     rc == &g_rc_win ? (" (" + std::to_string(rc->flushes.load()) + " held flushes)").c_str() : "");
+    }
+    if (g_nt.n > 0) {
+        const NetTrace& t = g_nt;
+        const double n = (double) t.n;
+        std::fprintf(stderr, "glm net trace (us per helper route, %llu routes): device route->wait %.1f, route->answer %.1f, "
+                             "wait %.1f (%.0f%% waited) | host seen->send %.1f, send %.1f, local %.1f, CPU %.1f, net0 "
+                             "answer %.1f (%llu), net1 answer %.1f (%llu), seen->published %.1f | wait by helpers: none "
+                             "%.1f (%llu), net0 %.1f (%llu), net1 %.1f (%llu), both %.1f (%llu; last net0 %llu, net1 %llu)\n",
+                     (unsigned long long) t.n, t.g_work / n, t.g_lat / n, t.g_wait / n, 100.0 * (double) t.waited / n,
+                     t.h_book / n, t.h_send / n, t.h_loc / n, t.h_cpu / n, t.f0_n > 0 ? t.h_f0 / t.f0_n : 0.0,
+                     (unsigned long long) t.f0_n, t.f1_n > 0 ? t.h_f1 / t.f1_n : 0.0, (unsigned long long) t.f1_n,
+                     t.h_tot / n, t.n_cls[0] ? t.w_cls[0] / (double) t.n_cls[0] : 0.0, (unsigned long long) t.n_cls[0],
+                     t.n_cls[1] ? t.w_cls[1] / (double) t.n_cls[1] : 0.0, (unsigned long long) t.n_cls[1],
+                     t.n_cls[2] ? t.w_cls[2] / (double) t.n_cls[2] : 0.0, (unsigned long long) t.n_cls[2],
+                     t.n_cls[3] ? t.w_cls[3] / (double) t.n_cls[3] : 0.0, (unsigned long long) t.n_cls[3],
+                     (unsigned long long) t.last0, (unsigned long long) t.last1);
+        std::fprintf(stderr, "glm net trace: device route kernel publish %.1f us after its seq | per class (none / net0 / "
+                             "net1 / both): device work %.0f / %.0f / %.0f / %.0f, device answer %.0f / %.0f / %.0f / %.0f, "
+                             "host seen->published %.0f / %.0f / %.0f / %.0f us\n", t.g_pub / n,
+                     t.gw_cls[0] / std::max<uint64_t>(1, t.n_cls[0]), t.gw_cls[1] / std::max<uint64_t>(1, t.n_cls[1]),
+                     t.gw_cls[2] / std::max<uint64_t>(1, t.n_cls[2]), t.gw_cls[3] / std::max<uint64_t>(1, t.n_cls[3]),
+                     t.gl_cls[0] / std::max<uint64_t>(1, t.n_cls[0]), t.gl_cls[1] / std::max<uint64_t>(1, t.n_cls[1]),
+                     t.gl_cls[2] / std::max<uint64_t>(1, t.n_cls[2]), t.gl_cls[3] / std::max<uint64_t>(1, t.n_cls[3]),
+                     t.ht_cls[0] / std::max<uint64_t>(1, t.n_cls[0]), t.ht_cls[1] / std::max<uint64_t>(1, t.n_cls[1]),
+                     t.ht_cls[2] / std::max<uint64_t>(1, t.n_cls[2]), t.ht_cls[3] / std::max<uint64_t>(1, t.n_cls[3]));
+    }
+    if (F->copy_j > 0 && F->copy_j <= (int) F->net.size() && !F->copy_refs.empty()) {
+        // the copies checked again: their hashes now against those of the start (the helper's RAM over the run)
+        auto& h = *F->net[(size_t) F->copy_j - 1];
+        const size_t n = F->copy_refs.size();
+        std::vector<uint64_t> there(n, 0);
+        std::string e2;
+        bool ok = true;
+        for (size_t at = 0; at < n && ok; at += 1024)
+            ok = h.hash_ram((int) std::min<size_t>(1024, n - at), F->copy_refs.data() + at, there.data() + at, e2);
+        size_t bad = 0;
+        for (size_t i = 0; i < n && ok; ++i) bad += there[i] != F->copy_hash[i];
+        std::fprintf(stderr, "glm net copy: %llu lane experts sent to the copies in %llu routes, %llu computed here; at the "
+                             "close %s\n", (unsigned long long) F->copy_sent.load(), (unsigned long long) F->copy_routes.load(),
+                     (unsigned long long) F->copy_kept.load(),
+                     ok ? (std::to_string(n - bad) + " of " + std::to_string(n) + " copies still match").c_str()
+                        : ("no check: " + e2).c_str());
+    }
+    for (auto& h : F->net) {
+        std::fprintf(stderr, "glm net helper: %s computed %llu experts in %llu routes, %.1f ms waiting\n", h->name().c_str(),
+                     (unsigned long long) h->experts, (unsigned long long) h->routes, h->ms_wait);
+        h->close();
+    }
+    F->net.clear();
     if (F->helper_owned_d) cudaFree(F->helper_owned_d);
     if (F->cpu_ans_h) cudaFreeHost(F->cpu_ans_h);
     if (F->cpu_seq_d) cudaFree(F->cpu_seq_d);
@@ -3885,6 +4335,30 @@ void Glm5Model::set_read_chunks(int n) {
         if (m->fast_ != nullptr) m->fast_->read_chunks = n > 0 ? std::min(16, n) : 0;
 }
 
+void Glm5Model::fast_prof_flush() {
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        FastState* F = m->fast_;
+        if (F == nullptr || !F->prof_on || F->ptokens == 0) continue;
+        std::vector<std::pair<double, std::string>> v;
+        double tot = 0;
+        for (auto& kv : F->pacc) {
+            v.push_back({kv.second, kv.first});
+            tot += kv.second;
+        }
+        std::sort(v.rbegin(), v.rend());
+        std::string line;
+        char b[96];
+        for (auto& e : v) {
+            std::snprintf(b, sizeof b, " %s %.3f", e.second.c_str(), e.first / (double) F->ptokens);
+            line += b;
+        }
+        std::fprintf(stderr, "glm prof request CUDA%d: %llu tokens, %.2f ms/token |%s\n", m->dev_,
+                     (unsigned long long) F->ptokens, tot / (double) F->ptokens, line.c_str());
+        F->pacc.clear();
+        F->ptokens = 0;
+    }
+}
+
 Glm5Model::FastStats Glm5Model::fast_stats() const {
     FastStats s;
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
@@ -3998,6 +4472,45 @@ void Glm5Model::fast_service() {
         F->processed.fetch_add((uint64_t) w_held, std::memory_order_release);
         w_n = w_held = 0;
     };
+    // a verify window's routes with net helpers (STRATA_GLM_NET_WIN_HOLD, on): each token's net requests go out as its
+    // route comes, the answers are read once the layer's last token routed - one network wait a window layer instead of
+    // one a token (the device waits for the window's answers at the layer's end; the held routes count as processed then)
+    static const bool net_win_hold = [] {
+        const char* v = getenv("STRATA_GLM_NET_WIN_HOLD");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    struct NetHeld {
+        gf::CpuAnswer* ans;
+        unsigned int seq;
+        int nn[4];
+        bool ok;
+        std::chrono::steady_clock::time_point t0;
+    };
+    NetHeld nh_q[kWinMax];
+    int nh_n = 0;
+    const auto net_flush = [&] {
+        if (nh_n == 0) return;
+        const auto tf = std::chrono::steady_clock::now();
+        for (int k = 0; k < nh_n; ++k) {
+            NetHeld& h = nh_q[k];
+            bool ok = h.ok;
+            for (size_t j = 0; j < F->net.size(); ++j)
+                if (h.nn[j] > 0 && !F->net[j]->finish(h.ans->part, F->helper_error)) ok = false;   // (in order, per helper)
+            if (!ok) {
+                std::fill_n(h.ans->part, g.n_embd, 0.0f);
+                F->helper_failed.store(true, std::memory_order_release);
+            }
+            std::atomic_thread_fence(std::memory_order_release);
+            h.ans->seq = h.seq;
+            g_rc_win.total_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - h.t0).count(), std::memory_order_relaxed);
+        }
+        g_rc_win.net_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - tf).count(), std::memory_order_relaxed);
+        g_rc_win.flushes.fetch_add(1, std::memory_order_relaxed);
+        F->processed.fetch_add((uint64_t) nh_n, std::memory_order_release);
+        nh_n = 0;
+    };
     unsigned int polls = 0;
 #if defined(_WIN32) && defined(STRATA_USE_HIP)
     auto last_kick = last_route;
@@ -4055,6 +4568,7 @@ void Glm5Model::fast_service() {
             last_route = std::chrono::steady_clock::now();
         }
         std::atomic_thread_fence(std::memory_order_acquire);
+        const int64_t nt_seen = F->tlog_h != nullptr ? nt_now() : 0;
         // (the lanes are made at the CPU lane's setup, after this thread started; an EXL3 pack's merged rows with them)
         // A batched rows step's group (STRATA_GLM_GROUP_EXPERTS, win_rows) is held the same way and merged on this part's
         // own pool - the other part works on its own group meanwhile; not with a helper GPU (it answers per route)
@@ -4068,6 +4582,7 @@ void Glm5Model::fast_service() {
                 if (rq->win >= rq->win_n - 1 || w_held >= kWinMax) win_flush();
             } else {
                 F->processed.fetch_add(1, std::memory_order_release);
+                if (nh_n > 0 && rq->win >= rq->win_n - 1) net_flush();
             }
             ++next;
             continue;
@@ -4322,49 +4837,227 @@ void Glm5Model::fast_service() {
             int ne = 0;
             const uint8_t* blob[8];
             float w[8];
+            int blob_key[8];
             int hn = 0, helper_keys[8];
             float helper_w[8];
+            int nn[4] = {}, net_keys[4][8];
+            float net_w[4][8];
             for (int i = 0; i < g.n_exp_used; ++i)
                 if ((cm >> i) & 1u) {
                     const int key = rq->layer * g.n_expert + rq->ids[i];
                     if (F->helper.owns(key)) {
                         helper_keys[hn] = key;
                         helper_w[hn++] = rq->w[i];
+                    } else if (const int nx = F->net_of.empty() ? 0 : F->net_of[(size_t) key]; nx > 0) {
+                        net_keys[nx - 1][nn[nx - 1]] = key;
+                        net_w[nx - 1][nn[nx - 1]++] = rq->w[i];
                     } else {
                         blob[ne] = (const uint8_t*) rq->cpu_src[i];
+                        blob_key[ne] = key;
                         w[ne++] = rq->w[i];
                     }
                 }
+            // the copy share: some of the lane's experts to the helper with their copies, in its request (copy_r)
+            if (ne > 0 && F->copy_j > 0) {
+                const int cj = F->copy_j - 1;
+                int c = 0;
+                for (int i = 0; i < ne; ++i) c += F->copy_of[(size_t) blob_key[i]] != 0;
+                const int r = c > 0 ? F->copy_r[ne][c][nn[cj] > 0 ? 1 : 0] : 0;
+                if (r > 0) {
+                    int kept = 0, sent = 0;
+                    for (int i = 0; i < ne; ++i)
+                        if (sent < r && F->copy_of[(size_t) blob_key[i]] != 0) {
+                            net_keys[cj][nn[cj]] = blob_key[i];
+                            net_w[cj][nn[cj]++] = w[i];
+                            ++sent;
+                        } else {
+                            blob[kept] = blob[i];
+                            w[kept] = w[i];
+                            blob_key[kept++] = blob_key[i];
+                        }
+                    ne = kept;
+                    F->copy_sent.fetch_add((uint64_t) sent, std::memory_order_relaxed);
+                    F->copy_routes.fetch_add(1, std::memory_order_relaxed);
+                }
+                F->copy_kept.fetch_add((uint64_t) ne, std::memory_order_relaxed);
+            }
             // a verify window's token answers into its own slot (the device waits for them at the layer's end)
             gf::CpuAnswer* ans = F->cpu_ans_h;
             if (rq->win > 0 && rq->win < 16 && F->win.ans_h[rq->win] != nullptr) ans = F->win.ans_h[rq->win];
             if (F->helper.device() >= 0) {
                 const auto& ly = F->L[(size_t) rq->layer];
+                const bool in_win = rq->win_n > 1;
+                RouteClock& rc = in_win ? g_rc_win : g_rc_tok;
+                rc.n.fetch_add(1, std::memory_order_relaxed);
+                const bool hold = in_win && net_win_hold && !F->net.empty() && rq->win < 16 && nh_n < kWinMax &&
+                                  nh_n < 16;   // (GlmNetHelper's routes on the wire)
+                if (nh_n > 0 && !hold) net_flush();   // (never: a window's tokens come together)
                 std::fill_n(ans->part, g.n_embd, 0.0f);
-                if (F->helper_failed.load(std::memory_order_acquire) || (hn > 0 &&
-                    !F->helper.compute(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, hn, helper_keys, helper_w,
-                                       rq->x, ans->part, F->helper_error))) {
+                // the net helpers' requests go out first: they are on the wire while the local helper and the CPU work
+                FastState::HostT* ht = F->tlog_h != nullptr && !in_win ? &F->htlog[next & (gf::kTlog - 1)] : nullptr;
+                if (ht != nullptr) {
+                    *ht = FastState::HostT{};
+                    ht->seen = nt_seen;
+                    ht->beg = nt_now();
+                    ht->flags = (nn[0] > 0 ? 1u : 0u) | (F->net.size() > 1 && nn[1] > 0 ? 2u : 0u) | (hn > 0 ? 4u : 0u) |
+                                (ne > 0 ? 8u : 0u);
+                }
+                bool net_ok = !F->helper_failed.load(std::memory_order_acquire);
+                // kCompute2 (STRATA_GLM_NET_PROTO=2, a helperd of protocol 2): the q8_1 the route copied for the helper's
+                // GPU experts, the CPU activation (made here, the bytes the helper would make) for its RAM-tier ones -
+                // ~4.6 KB each instead of 16 KB of x; STRATA_GLM_NET_R16=1: FP16 answers; STRATA_GLM_NET_PROTO_CHECK=<n>:
+                // every n-th such request also carries x and the helper checks both against it
+                static const int proto = [] {
+                    const char* v = getenv("STRATA_GLM_NET_PROTO");
+                    return v != nullptr ? std::atoi(v) : 1;
+                }();
+                static const bool r16 = getenv("STRATA_GLM_NET_R16") != nullptr && std::atoi(getenv("STRATA_GLM_NET_R16")) != 0;
+                static const int pchk = getenv("STRATA_GLM_NET_PROTO_CHECK") ? std::max(1, std::atoi(getenv("STRATA_GLM_NET_PROTO_CHECK"))) : 0;
+                static uint64_t p2_n = 0;
+                static bool p2_warned = false;
+                alignas(64) static uint8_t xk_buf[strata::kernels::cpu::kNativeActBytes];
+                bool xk_made = false;
+                size_t xk_bytes = 0;
+                for (size_t j = 0; j < F->net.size() && net_ok; ++j) {
+                    if (nn[j] == 0) continue;
+                    auto& nh = *F->net[j];
+                    const bool v2 = proto >= 2 && nh.proto() >= 2 && rq->xq_ok != 0u && !in_win;
+                    if (proto >= 2 && nh.proto() < 2 && !p2_warned) {
+                        p2_warned = true;
+                        std::fprintf(stderr, "glm net helper: STRATA_GLM_NET_PROTO=2 but %s speaks protocol %u - kCompute "
+                                             "(FP32 x) to it\n", nh.name().c_str(), nh.proto());
+                    }
+                    if (!v2) {
+                        if (!nh.begin(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, nn[j], net_keys[j], net_w[j], rq->x,
+                                      F->helper_error)) net_ok = false;
+                        continue;
+                    }
+                    bool gpu = false, cpu = false;
+                    for (int i = 0; i < nn[j]; ++i) (nh.owns_ram(net_keys[j][i]) ? cpu : gpu) = true;
+                    uint32_t fl = (gpu ? (uint32_t) netproto::kXq : 0u) | (cpu ? (uint32_t) netproto::kXk : 0u);
+                    if (cpu && !xk_made) {
+                        const auto& nf = F->cpu_fmt[(size_t) rq->layer];
+                        xk_bytes = nf.act_bytes;
+                        if (nf.n_ff > 0 && xk_bytes > 0 && xk_bytes <= sizeof(xk_buf)) {
+                            strata::kernels::cpu::native_quant_act(nf, rq->x, xk_buf);
+                            xk_made = true;
+                        }
+                    }
+                    if (cpu && !xk_made) fl = (fl & ~(uint32_t) netproto::kXk) | netproto::kXf;
+                    const bool chk = pchk > 0 && ++p2_n % (uint64_t) pchk == 0;
+                    if (chk) fl |= netproto::kXf | netproto::kCheck;
+                    else if (r16) fl |= netproto::kR16;
+                    if (!nh.begin2(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, nn[j], net_keys[j], net_w[j], fl,
+                                   rq->xq, (size_t) g.n_embd / 32 * 36, xk_buf, xk_bytes, rq->x, F->helper_error))
+                        net_ok = false;
+                }
+                if (ht != nullptr) ht->sent = nt_now();
+                const auto tl0 = std::chrono::steady_clock::now();
+                // STRATA_GLM_HELPER_OVERLAP=1 (off by default): the local helper GPU's launches go out, the CPU experts
+                // run, then the helper's wait - the two were one after the other (~28 + ~54 us a route); the sums are
+                // the same (part = helper's, then += the CPU's, then += the net helpers').  Measured (10-26, NET_TRACE):
+                // no visible gain - the launches themselves are the ~28 us, and the net helpers are the long pole
+                static const bool ovl = [] {
+                    const char* v = getenv("STRATA_GLM_HELPER_OVERLAP");
+                    return v != nullptr && std::atoi(v) != 0;
+                }();
+                const bool split = ovl && hn > 0 && ne > 0;
+                const bool local_ok = !(F->helper_failed.load(std::memory_order_acquire) || (hn > 0 &&
+                    !(split ? F->helper.compute_begin(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, hn, helper_keys,
+                                                      helper_w, rq->x, ans->part, F->helper_error)
+                            : F->helper.compute(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, hn, helper_keys,
+                                                helper_w, rq->x, ans->part, F->helper_error))));
+                rc.local_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - tl0).count(), std::memory_order_relaxed);
+                if (!local_ok) {
                     // Retire the request so the main GPU can finish and report the error, not spin forever.
                     std::fill_n(ans->part, g.n_embd, 0.0f);
                     F->helper_failed.store(true, std::memory_order_release);
                 }
+                if (ht != nullptr) ht->loc = nt_now();
                 // Quantize on the CPU only when this route actually has CPU fallback.
                 if (ne > 0) {
                     const auto cpu_t0 = std::chrono::steady_clock::now();
                     float cpu_part[4096];
                     fast_cpu_experts(rq->layer, ne, blob, w, rq->x, cpu_part);
+                    if (split && local_ok && !F->helper.compute_finish(F->helper_error)) {
+                        std::fill_n(ans->part, g.n_embd, 0.0f);
+                        F->helper_failed.store(true, std::memory_order_release);
+                    }
                     for (int j = 0; j < g.n_embd; ++j) ans->part[j] += cpu_part[j];
                     F->cpu_experts.fetch_add((uint64_t) ne, std::memory_order_relaxed);
                     F->cpu_routes.fetch_add(1, std::memory_order_relaxed);
                     F->cpu_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
                                            std::chrono::steady_clock::now() - cpu_t0).count(), std::memory_order_relaxed);
+                    rc.cpu_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - cpu_t0).count(), std::memory_order_relaxed);
                 }
                 F->helper_experts.fetch_add((uint64_t) hn, std::memory_order_relaxed);
                 F->helper_routes.fetch_add(hn > 0, std::memory_order_relaxed);
+                if (hold) {   // the answer once the layer's last window token routed (net_flush)
+                    NetHeld& h = nh_q[nh_n++];
+                    h.ans = ans;
+                    h.seq = next;
+                    for (int j = 0; j < 4; ++j) h.nn[j] = j < (int) F->net.size() && net_ok ? nn[j] : 0;
+                    h.ok = net_ok;
+                    h.t0 = t0;
+                    F->helper_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+                    if (rq->win >= rq->win_n - 1) net_flush();
+                    ++next;
+                    continue;   // (processed at the flush)
+                }
+                if (ht != nullptr) ht->cpu = nt_now();
+                const auto tn0 = std::chrono::steady_clock::now();
+                for (size_t j = 0; j < F->net.size(); ++j) {
+                    if (nn[j] > 0 && net_ok && !F->net[j]->finish(ans->part, F->helper_error)) net_ok = false;
+                    if (ht != nullptr && j < 2 && nn[j] > 0) (j == 0 ? ht->fin0 : ht->fin1) = nt_now();
+                }
+                rc.net_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - tn0).count(), std::memory_order_relaxed);
+                if (!net_ok) {
+                    std::fill_n(ans->part, g.n_embd, 0.0f);
+                    F->helper_failed.store(true, std::memory_order_release);
+                }
                 F->helper_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+                rc.total_us.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
                                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_release);
                 ans->seq = next;
+                if (ht != nullptr) {
+                    ht->pub = nt_now();
+                    ht->seq = next;
+                    // an older route's device times are in by now: sum its record with them
+                    const unsigned int m = next - 64u;
+                    const FastState::HostT& o = F->htlog[m & (gf::kTlog - 1)];
+                    const volatile unsigned long long* tl = F->tlog_h + 8 * (m & (gf::kTlog - 1));
+                    if (o.seq == m && m != 0 && tl[3] == m && tl[2] != 0ull && tl[1] >= tl[0] && tl[2] >= tl[1]) {
+                        NetTrace& t = g_nt;
+                        ++t.n;
+                        const double gw = (double) (tl[1] - tl[0]) / 1e3, gl = (double) (tl[2] - tl[0]) / 1e3,
+                                     wt = (double) (tl[2] - tl[1]) / 1e3;
+                        t.g_work += gw;
+                        t.g_lat += gl;
+                        t.g_wait += wt;
+                        t.waited += wt > 2.0;
+                        if (tl[4] >= tl[0]) t.g_pub += (double) (tl[4] - tl[0]) / 1e3;
+                        t.h_book += (o.beg - o.seen) / 1e3;
+                        t.h_send += (o.sent - o.beg) / 1e3;
+                        t.h_loc += (o.loc - o.sent) / 1e3;
+                        t.h_cpu += (o.cpu - o.loc) / 1e3;
+                        if (o.flags & 1u) t.h_f0 += (o.fin0 - o.beg) / 1e3, t.f0_n += 1;
+                        if (o.flags & 2u) t.h_f1 += (o.fin1 - o.beg) / 1e3, t.f1_n += 1;
+                        t.h_tot += (o.pub - o.seen) / 1e3;
+                        const int cls = (int) (o.flags & 3u);
+                        ++t.n_cls[cls];
+                        t.w_cls[cls] += wt;
+                        t.gw_cls[cls] += gw;
+                        t.gl_cls[cls] += gl;
+                        t.ht_cls[cls] += (o.pub - o.seen) / 1e3;
+                        if (cls == 3) (o.fin1 - o.fin0 > 5000 ? t.last1 : t.last0) += 1;
+                    }
+                }
             } else if (rq->win_n > 0 && F->win_lane[0] != nullptr && F->win_lane[1] != nullptr) {
                 // a batched window's token: its lane (token t on lane t % 2) answers it while this thread takes the
                 // next token's route (the ring entry, rq->x with it, stays until the device has the answer)
@@ -4388,6 +5081,8 @@ void Glm5Model::fast_service() {
             }
         }
         F->processed.fetch_add(1, std::memory_order_release);
+        // (a held window layer whose last token had nothing off the GPU: its earlier tokens' answers now)
+        if (nh_n > 0 && rq->win_n > 1 && rq->win >= rq->win_n - 1) net_flush();
         ++next;
     }
 }
@@ -4459,13 +5154,13 @@ void Glm5Model::fast_read_part(int il, int e, int role, uint8_t* blob, int chunk
     }
     const Shard& sh = pack_shards_[(size_t) (role == 0 ? nl.gate_shard : role == 1 ? nl.up_shard : nl.down_shard)];
     const uint64_t off = role == 0   ? nl.gate_off + (uint64_t) e * Ly.gu_bytes
-                         : role == 1 ? nl.up_off + (uint64_t) e * Ly.gu_bytes
+                         : role == 1 ? nl.up_off + (uint64_t) e * Ly.up_bytes
                                      : nl.down_off + (uint64_t) e * Ly.dn_bytes;
-    const size_t len = role == 2 ? Ly.dn_bytes : Ly.gu_bytes;
+    const size_t len = role == 2 ? Ly.dn_bytes : role == 1 ? Ly.up_bytes : Ly.gu_bytes;
     const size_t piece = ((len + (size_t) n_chunks - 1) / (size_t) n_chunks + 4095) & ~(size_t) 4095;
     const size_t c0 = std::min(len, (size_t) chunk * piece), c1 = std::min(len, c0 + piece);
     if (c1 > c0)
-        read_slice(sh, off + c0, c1 - c0, blob + (role == 0 ? 0 : role == 1 ? Ly.gu_bytes : 2 * Ly.gu_bytes) + c0);
+        read_slice(sh, off + c0, c1 - c0, blob + (role == 0 ? 0 : role == 1 ? Ly.gu_bytes : Ly.down_off) + c0);
 }
 
 // ---- LOOKAHEAD, for the route of layer il (service thread, F->mu held): score the predictions made for this layer
@@ -4518,6 +5213,7 @@ void Glm5Model::fast_ahead_route(int il, const int* ids, unsigned int miss, cons
             if (e < 0) continue;
             const int key = la * g.n_expert + e;
             if (F->slot_of[(size_t) key] >= 0 || F->ram_of[(size_t) key] >= 0) continue;
+            if (!F->net_of.empty() && F->net_of[(size_t) key] != 0) continue;   // a net helper answers for it
             if (F->ah_inflight.load(std::memory_order_relaxed) >= kMaxInflight) {
                 ++F->ah_full;
                 continue;
@@ -4573,6 +5269,65 @@ void Glm5Model::fast_ahead_reader() {
     }
 }
 
+// STRATA_GLM_DROP_PRELOAD: the reader of a prompt's dropped experts - disk -> pinned buffer (two, alternating) ->
+// its claimed VRAM slot on its own stream; fast_boundary makes each live once its copy landed
+void Glm5Model::drop_preload_worker() {
+    FastState* F = fast_;
+    cudaSetDevice(dev_);
+    size_t big = 0;
+    for (int il = l0_; il < lt_; ++il)
+        if (F->L[(size_t) il].moe) big = std::max(big, (size_t) F->L[(size_t) il].blob);
+    if (cudaStreamCreateWithFlags(&F->pre_st, cudaStreamNonBlocking) != cudaSuccess) return;
+    for (int b = 0; b < 2; ++b) {
+        if (cudaHostAlloc((void**) &F->pre_buf[b], big, cudaHostAllocDefault) != cudaSuccess) return;
+        cudaEventCreateWithFlags(&F->pre_bev[b], cudaEventDisableTiming);
+    }
+    int b = 0;
+    for (;;) {
+        FastState::PreJob j;
+        {
+            std::unique_lock<std::mutex> lq(F->pre_mu);
+            F->pre_cv.wait(lq, [&] { return F->pre_quit || !F->pre_q.empty(); });
+            if (F->pre_quit) return;
+            j = F->pre_q.front();
+            F->pre_q.erase(F->pre_q.begin());
+            ++F->pre_busy;
+        }
+        cudaEventSynchronize(F->pre_bev[b]);   // (the buffer's previous copy has left it)
+        for (int role = 0; role < 3; ++role) fast_read_part(j.il, j.e, role, F->pre_buf[b]);
+        cudaEvent_t ev = nullptr;
+        cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+        cudaMemcpyAsync(j.dst, F->pre_buf[b], F->L[(size_t) j.il].blob, cudaMemcpyHostToDevice, F->pre_st);
+        cudaEventRecord(ev, F->pre_st);
+        cudaEventRecord(F->pre_bev[b], F->pre_st);
+        b ^= 1;
+        {
+            std::lock_guard<std::mutex> lq(F->pre_mu);
+            F->pre_done.push_back(FastState::PreDone{j.il, j.e, j.vslot, ev});
+            --F->pre_busy;
+        }
+        F->pre_cv.notify_all();
+    }
+}
+
+// the jobs not started go back (their slots free), the one in hand finishes, the copies land - before a lending
+void Glm5Model::drop_preload_quiesce() {
+    FastState* F = fast_;
+    if (F == nullptr || !F->pre_th.joinable()) return;
+    std::vector<FastState::PreJob> back;
+    {
+        std::unique_lock<std::mutex> lq(F->pre_mu);
+        back.swap(F->pre_q);
+        F->pre_cv.wait(lq, [&] { return F->pre_busy == 0; });
+    }
+    if (F->pre_st != nullptr) cudaStreamSynchronize(F->pre_st);
+    if (!back.empty()) {
+        std::lock_guard<std::mutex> lk(F->mu);
+        for (const auto& j : back) F->lp[(size_t) j.il].st[(size_t) j.vslot] = FastState::kFree;
+        F->pre_cancelled += back.size();
+    }
+}
+
 // ---------------------------------------------------------------- between tokens
 //
 // Every device idle, the service thread caught up: (1) RAM slots of promoted experts free up, disk reads of the
@@ -4580,6 +5335,103 @@ void Glm5Model::fast_ahead_reader() {
 // (3) every layer's spares are refilled - from free slots, else by evicting the layer's least-used resident
 // (demoted into the RAM tier when it beats the RAM tier's least-used, dropped otherwise); (4) the RAM tier keeps
 // a few free slots for disk reads.  The table edits ride one small update kernel at the head of the next token.
+// STRATA_GLM_WIN_SPARES=1 (10-27, default off): a verify window has one boundary for its T tokens, so each layer's
+// spares - the slots a fetched expert is promoted into - were refilled once for T tokens' fetches: in MTP fixed-1 ~59%
+// of the window's fetches landed in scratch (plain decode ~23%) and missed again later (promotions 20 vs 33 a token).
+// Before layer il's MoE is enqueued this lands the layer's demotions that finished since the boundary (fast_boundary's
+// step 2, this layer only) and fills its empty spares from free slots; the table edits go on the compute stream ahead of
+// the layer's routes (this window's routes of the layer are enqueued after them; earlier windows' were all processed at
+// the boundary).  No evictions here (the boundary starts them).  Placement only: every expert's arithmetic is the same
+bool glm_win_spares(Glm5Model::FastState* F, int il, std::string& err) {
+    if (F == nullptr || F->lp.empty() || F->rc.empty() || il < 0 || il >= (int) F->lp.size() || F->bg_hold) return true;
+    auto& P = F->lp[(size_t) il];
+    if (P.n == 0) return true;
+    const size_t NL = F->lp.size();
+    constexpr int K = Glm5Model::FastState::kWsUpd;
+    if (F->ws_key_h == nullptr) {
+        const size_t n = NL * (size_t) K;
+        if (cudaHostAlloc((void**) &F->ws_key_h, n * sizeof(int), cudaHostAllocDefault) != cudaSuccess ||
+            cudaHostAlloc((void**) &F->ws_val_h, n * sizeof(unsigned long long), cudaHostAllocDefault) != cudaSuccess ||
+            cudaMalloc((void**) &F->ws_key_d, n * sizeof(int)) != cudaSuccess ||
+            cudaMalloc((void**) &F->ws_val_d, n * sizeof(unsigned long long)) != cudaSuccess) {
+            err = "glm window spares: the staging did not allocate";
+            return false;
+        }
+    }
+    int* kh = F->ws_key_h + (size_t) il * K;
+    unsigned long long* vh = F->ws_val_h + (size_t) il * K;
+    int nu = 0;
+    const auto upd = [&](size_t k, unsigned long long v) {
+        for (int i = 0; i < nu; ++i)
+            if (kh[i] == (int) k) {
+                vh[i] = v;
+                return;
+            }
+        kh[nu] = (int) k;
+        vh[nu] = v;
+        ++nu;
+    };
+    // (never waits for the service thread: it can hold the lock while this enqueue is what it waits for - the window
+    // then stalled ~1 s a token; a busy lock skips the layer, its spares come at the boundary as before)
+    std::unique_lock<std::mutex> lk(F->mu, std::try_to_lock);
+    if (!lk.owns_lock()) return true;
+    ++F->ws_calls;
+    std::vector<Glm5Model::FastState::Drain> still;
+    still.reserve(F->draining.size());
+    for (auto& d : F->draining) {
+        if (d.il != il || nu + 2 > K) {
+            still.push_back(d);
+            continue;
+        }
+        const cudaError_t de = cudaEventQuery(d.ev);
+        if (de == cudaErrorNotReady) {
+            still.push_back(d);
+            continue;
+        }
+        if (de != cudaSuccess) return glmfast::cuda_ok(de, "glm window spares: demotion event", err);
+        auto& R = F->rc[(size_t) d.rclass];
+        if (R.st[(size_t) d.rslot] == Glm5Model::FastState::kRDemote && R.key[(size_t) d.rslot] == d.key) {
+            R.st[(size_t) d.rslot] = Glm5Model::FastState::kRHold;
+            upd(F->rtab_key(d.key), (unsigned long long) (R.base + (size_t) d.rslot * R.stride));
+            if (F->ram_resident) {
+                upd(F->tab_key((size_t) d.key), 0ull);
+                F->slot_of[(size_t) d.key] = -1;
+            }
+        }
+        char& vst = P.st[(size_t) d.vslot];
+        if (vst == Glm5Model::FastState::kDraining) vst = Glm5Model::FastState::kFree;
+        F->ev_free.push_back(d.ev);
+        ++F->ws_drains;
+    }
+    F->draining.swap(still);
+    for (int j = 0; j < gf::kSpares && nu < K; ++j) {
+        if (P.spare[j] >= 0) continue;
+        int s = -1;
+        for (int s2 = 0; s2 < P.n; ++s2)
+            if (P.st[(size_t) s2] == Glm5Model::FastState::kFree) {
+                s = s2;
+                break;
+            }
+        if (s < 0) break;
+        P.st[(size_t) s] = Glm5Model::FastState::kSpare;
+        P.key[(size_t) s] = -1;
+        P.spare[j] = s;
+        upd(F->spare_key(il, j), (unsigned long long) P.slot_ptr(s));
+        ++F->ws_spares;
+    }
+    if (F->ws_calls % 9000 == 0)
+        std::fprintf(stderr, "glm window spares: %llu layer calls, %llu demotions landed, %llu spares refilled mid-window\n",
+                     (unsigned long long) F->ws_calls, (unsigned long long) F->ws_drains,
+                     (unsigned long long) F->ws_spares);
+    if (nu == 0) return true;
+    int* kd = F->ws_key_d + (size_t) il * K;
+    unsigned long long* vd = F->ws_val_d + (size_t) il * K;
+    cudaMemcpyAsync(kd, kh, (size_t) nu * sizeof(int), cudaMemcpyHostToDevice, F->cs);
+    cudaMemcpyAsync(vd, vh, (size_t) nu * sizeof(unsigned long long), cudaMemcpyHostToDevice, F->cs);
+    gf::tab_update(F->tab, kd, vd, nu, F->cs);
+    return glmfast::cuda_ok(cudaGetLastError(), "glm window spares: table update", err);
+}
+
 bool Glm5Model::fast_boundary(std::string& err) {
     FastState* F = fast_;
     if (F == nullptr || F->lp.empty() || F->rc.empty()) return true;
@@ -4784,6 +5636,9 @@ bool Glm5Model::fast_boundary(std::string& err) {
             }
             if (v < 0) break;
             const int vkey = il * g.n_expert + P.key[(size_t) v];
+            // what the RAM tier weighs it by: its aged count - not the LRU pick's score (0, which made every victim
+            // colder than all of RAM: with no free RAM slot the most used of them dropped to the disk)
+            const uint32_t vc = F->cnt[(size_t) vkey];
             // demote it into the RAM tier: a free slot, else the RAM tier's victim (if colder than it)
             int rs = -1;
             uint32_t rc_min = UINT32_MAX;
@@ -4809,7 +5664,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 rs = ram_victim(R);
                 if (rs >= 0) rc_min = F->cnt[(size_t) R.key[(size_t) rs]];
             }
-            if (rs >= 0 && (R.st[(size_t) rs] == FastState::kRFree || rc_min < bc)) {
+            if (rs >= 0 && (R.st[(size_t) rs] == FastState::kRFree || rc_min < vc)) {
                 if (R.st[(size_t) rs] == FastState::kRHold) {
                     const int old = R.key[(size_t) rs];
                     F->left[(size_t) old] = 2;
@@ -4860,6 +5715,63 @@ bool Glm5Model::fast_boundary(std::string& err) {
             R.st[(size_t) best] = FastState::kRFree;
             ++nfree;
         }
+    }
+    // (4b) RAM REFILL (10-26): a long prompt's lending parks VRAM experts in the RAM tier over colder RAM experts, which
+    // go to the disk; once the prompt's slots are back, the parked ones return to VRAM and their RAM slots stay free,
+    // while the evicted ones are in no tier - the decode after a 27K prompt then read 0.64 experts a token from the disk
+    // (moe_wait 0.5 -> 2.3 ms a token) until its misses had refilled the tier.  Here a class with more free slots than
+    // it keeps for the next token reads its most used experts that are in no tier (and no helper's) back in the
+    // background, through the lookahead readers (kRLoad: a route that wants one first reads or waits for it itself).
+    // STRATA_GLM_RAM_REFILL=<reads in flight> (default 8; 0: off).
+    static const int refill = [] {
+        const char* v = getenv("STRATA_GLM_RAM_REFILL");
+        return v ? std::max(0, std::atoi(v)) : 8;
+    }();
+    if (refill > 0 && !F->ram_resident && !F->rload.empty()) {
+        if (F->ah_th.empty())
+            for (int i = 0; i < 2; ++i) F->ah_th.emplace_back([this] { fast_ahead_reader(); });
+        bool queued = false;
+        for (size_t c = 0; c < F->rc.size(); ++c) {
+            auto& R = F->rc[c];
+            int nfree = 0;
+            for (char st : R.st) nfree += st == FastState::kRFree;
+            int budget = std::min(nfree - keep_free, refill - F->ah_inflight.load(std::memory_order_relaxed));
+            if (budget <= 0) continue;
+            std::vector<std::pair<uint32_t, int>> cand;   // (usage, key) of this class's experts in no tier
+            for (int il = l0_; il < lt_; ++il) {
+                if (!F->L[(size_t) il].moe || F->layer_rc[(size_t) il] != (int) c) continue;
+                for (int e = 0; e < g.n_expert; ++e) {
+                    const int key = il * g.n_expert + e;
+                    if (F->slot_of[(size_t) key] >= 0 || F->ram_of[(size_t) key] >= 0 || F->aux_owns(key)) continue;
+                    if (F->usage[(size_t) key] == 0) continue;
+                    cand.push_back({F->usage[(size_t) key], key});
+                }
+            }
+            if (cand.empty()) continue;
+            const int n = std::min(budget, (int) cand.size());
+            std::partial_sort(cand.begin(), cand.begin() + n, cand.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            int rs = 0;
+            for (int i = 0; i < n; ++i) {
+                while (rs < R.n && R.st[(size_t) rs] != FastState::kRFree) ++rs;
+                if (rs >= R.n) break;
+                const int key = cand[(size_t) i].second;
+                R.key[(size_t) rs] = key;
+                R.tick[(size_t) rs] = F->clock;
+                R.st[(size_t) rs] = FastState::kRLoad;
+                F->ram_of[(size_t) key] = rs;
+                const uint64_t tag = ++F->ah_tag;
+                F->rload[c][(size_t) rs].store(tag << 2, std::memory_order_release);
+                F->ah_inflight.fetch_add(1, std::memory_order_relaxed);
+                ++F->diag_refill;
+                {
+                    std::lock_guard<std::mutex> lq(F->ah_mu);
+                    F->ah_q.push_back(FastState::AheadJob{(int) c, rs, key / g.n_expert, key % g.n_expert, tag});
+                }
+                queued = true;
+            }
+        }
+        if (queued) F->ah_cv.notify_all();
     }
     // (5) background moves between the tiers, over the copy stream.  Where the CPU lane takes every RAM-tier expert
     //     (two sockets beside an x8 link: 0.18 ms an expert on the CPU, 2.1 over PCIe) no route fetches one into VRAM
@@ -4912,6 +5824,32 @@ bool Glm5Model::fast_boundary(std::string& err) {
             F->ev_free.push_back(m.ev);
         }
         F->bg.swap(keep);
+        // landed drop preloads go live (unless a route read the expert into another tier meanwhile)
+        {
+            std::lock_guard<std::mutex> lq(F->pre_mu);
+            std::vector<FastState::PreDone> rest;
+            for (auto& d : F->pre_done) {
+                const cudaError_t pe = cudaEventQuery(d.ev);
+                if (pe == cudaErrorNotReady) { rest.push_back(d); continue; }
+                if (pe != cudaSuccess) return glmfast::cuda_ok(pe, "glm drop preload event", err);
+                auto& P = F->lp[(size_t) d.il];
+                const size_t key = (size_t) d.il * NE + d.e;
+                if (F->slot_of[key] >= 0 || F->ram_of[key] >= 0) {
+                    P.st[(size_t) d.vslot] = FastState::kFree;
+                    ++F->pre_discard;
+                } else {
+                    P.st[(size_t) d.vslot] = FastState::kResident;
+                    P.key[(size_t) d.vslot] = d.e;
+                    P.tick[(size_t) d.vslot] = F->clock;
+                    F->slot_of[key] = d.vslot;
+                    if (F->left[key] == 3) F->left[key] = 0;
+                    upd(F->tab_key(key), (unsigned long long) P.slot_ptr(d.vslot));
+                    ++F->pre_landed;
+                }
+                cudaEventDestroy(d.ev);
+            }
+            F->pre_done.swap(rest);
+        }
         static const int bg_n = [] {
             const char* v = getenv("STRATA_GLM_PROMOTE");
             return v != nullptr ? std::max(0, std::atoi(v)) : 8;
@@ -4928,7 +5866,18 @@ bool Glm5Model::fast_boundary(std::string& err) {
         // a pipelined window's boundary comes once for its tokens (not one a token): the budgets for them all
         const int bk = std::max(1, std::min(8, F->bnd_tokens.exchange(0)));
         const int bg_nk = bg_n * bk;
-        const int bg_up_max = std::max(bg_n, bg_fill) * bk;
+        // (d) VRAM REFILL (10-27): right after a prompt's loan came back (prefill_return) the freed tail - several GB on
+        //     a long prompt - took ~bg_fill a boundary to refill, so the first decode tokens after a 64K prompt ran
+        //     at 25.4 tok/s against 28.2 for the next request at the same context.  STRATA_GLM_VRAM_REFILL=<promotions
+        //     a boundary> (0 / unset: off) refills the free slots in bulk until none is left: up to 64 a layer, the
+        //     layer's hottest RAM-tier experts, on the copy stream (the decode's own copies queue behind them).
+        static const int vram_refill = [] {
+            const char* v = getenv("STRATA_GLM_VRAM_REFILL");
+            return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+        }();
+        const bool burst = vram_refill > 0 && F->refill_burst;
+        const int lay_cap = burst ? 64 : 8;   // free slots a layer one boundary fills
+        const int bg_up_max = burst ? std::max(vram_refill, std::max(bg_n, bg_fill) * bk) : std::max(bg_n, bg_fill) * bk;
         constexpr uint32_t bg_ratio = 2;
         bool lane_all = F->cpu_plan != 0ull;   // the CPU lane takes every RAM-tier expert of a route
         for (int f = 1; f <= g.n_exp_used && lane_all; ++f) lane_all = (int) ((F->cpu_plan >> (4 * f)) & 15ull) == f;
@@ -4957,10 +5906,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
                 int cs = -1;
                 uint32_t cold = UINT32_MAX;
-                int frees[8], nfree = 0;   // (refill: up to 8 a layer a boundary)
+                int frees[64], nfree = 0;   // (refill: up to 8 a layer a boundary, 64 in a VRAM-refill burst)
                 for (int s2 = 0; s2 < P.n; ++s2) {
                     if (P.st[(size_t) s2] == FastState::kFree) {
-                        if (nfree < (bg_fill > 0 ? 8 : 1)) frees[nfree++] = s2;
+                        if (nfree < (bg_fill > 0 ? lay_cap : 1)) frees[nfree++] = s2;
                     } else if (P.st[(size_t) s2] == FastState::kResident && P.key[(size_t) s2] >= 0) {
                         const uint32_t c = F->cnt[(size_t) il * NE + P.key[(size_t) s2]];
                         if (c < cold) {
@@ -4971,11 +5920,11 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 }
                 // the layer's hottest RAM-only experts: one for each free slot (at least one: the demotion's candidate)
                 const int want = std::max(1, nfree);
-                std::array<Cand, 8> top{};
+                std::array<Cand, 64> top{};
                 int ntop = 0;
                 for (int e = 0; e < NE; ++e) {
                     const size_t key = (size_t) il * NE + e;
-                    if (F->slot_of[key] >= 0 || F->helper.owns((int) key)) continue;
+                    if (F->slot_of[key] >= 0 || F->aux_owns((int) key)) continue;
                     const int rs = F->ram_of[key];
                     if (rs < 0 || R.st[(size_t) rs] != FastState::kRHold) continue;
                     const uint32_t h = F->cnt[key];
@@ -4995,6 +5944,8 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 }
             }
             std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.hot > b.hot; });
+            bool any_free = false;
+            for (const auto& c : cands) any_free = any_free || c.free_slot >= 0;
             int issued = 0, filled = 0;   // demotion moves (at most bg_n), promotions into free slots (bg_up_max)
             for (const auto& c : cands) {
                 if (issued >= bg_nk && filled >= bg_up_max) break;
@@ -5026,6 +5977,14 @@ bool Glm5Model::fast_boundary(std::string& err) {
                     cudaEventRecord(ev, F->copy);
                     F->bg.push_back(FastState::BgMove{c.il, c.cold_slot, vkey, rc, rs, false, ev});
                     ++issued;
+                }
+            }
+            if (burst) {
+                F->burst_filled += (uint64_t) filled;
+                if (!any_free || filled == 0) {
+                    F->refill_burst = false;
+                    std::fprintf(stderr, "glm fast: CUDA%d VRAM refill after the prompt: %llu experts promoted into the "
+                                         "returned slots\n", dev_, (unsigned long long) F->burst_filled);
                 }
             }
         }
@@ -5279,6 +6238,12 @@ bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, c
     md.pf_src = F->pf_buf[il & 1];
     md.pf_dst = F->pf_buf[il & 1] + 8;
     md.pf_n = F->pf_n_buf[il & 1];
+    // kCompute2 (STRATA_GLM_NET_PROTO=2): the route hands the host this layer's FFN-input q8_1 with x
+    static const bool proto2 = [] {
+        const char* v = getenv("STRATA_GLM_NET_PROTO");
+        return v != nullptr && std::atoi(v) >= 2;
+    }();
+    if (proto2 && !F->net.empty()) md.req_xq = io.xq;
     // the CPU lane splits this layer's RAM-tier experts when the CPU has a dot product for its types
     const bool lane = (F->cpu_plan != 0ull || F->helper.device() >= 0) && F->cpu_fmt[(size_t) il].n_ff > 0;
     fast_moe_route(il, io, md, F->sh_hq, pred, n_ah, ah_bias, lane);

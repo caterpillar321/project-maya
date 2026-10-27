@@ -559,6 +559,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     const bool lane = (F->cpu_plan != 0ull || F->helper.device() >= 0) && F->cpu_fmt[(size_t) il].n_ff > 0;
     // STRATA_GLM_TRUNK_KEEP / _MAP: a window token leaves out the same experts the token path would (8: none)
     const int keep = il == mtp_il_ ? 8 : glmfast::trunk_skip_from(il);
+    // STRATA_GLM_WIN_SPARES=1: the layer's spares topped up before its routes (glm_win_spares; default off)
+    static const bool win_spares = [] {
+        const char* v = getenv("STRATA_GLM_WIN_SPARES");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (win_spares && part != 2 && !F->all_resident && !glm_win_spares(F, il, err)) return false;
     static const int promote_min = [] {
         const char* v = getenv("STRATA_GLM_PROMOTE_MIN");
         return v ? std::max(0, std::atoi(v)) : 0;

@@ -1193,7 +1193,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
             }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
-            const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
+            const uint64_t per[3] = {fm.up_off, fm.down_off - fm.up_off, blob - fm.down_off};
             const uint64_t at[3] = {0, fm.up_off, fm.down_off};
             for (int r = 0; r < 3; ++r) {
                 const uint64_t src = lay.gguf_off[(size_t) (3 * l + r)];
