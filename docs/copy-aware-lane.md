@@ -136,3 +136,43 @@ Test legacy copies, demand-ranked copies, and demand-ranked copies plus
 capture local/remote CPU time and end-to-end throughput, since more remote work
 can also increase reply waits. A separately trained profile is needed to avoid
 selecting the copies from the evaluation questions themselves.
+
+### Demand profile pilot: 2026-10-27
+
+Commit `cc80982`, same CUDA build settings and unchanged qshort chat/code
+harness as above. The profile was trained on existing agent-coding and general
+agent route logs (507,024 and 75,600 routes); the qshort evaluation trace was not
+used. Remote RAM remained 54 GiB, CPU threads six, and all primary/GPU-helper
+placement settings remained the production defaults. Each arm generated 3440
+tokens over two passes, including the greedy probes.
+
+| Arm | Chat tok/s, passes 1/2 | Code tok/s, passes 1/2 | Code local CPU experts/token, mean |
+|---|---|---|---:|
+| Legacy copies, legacy planner | 34.1 / 34.4 | 29.1 / 29.2 | 9.95 |
+| Demand copies, legacy planner | 34.5 / 34.6 | 29.8 / 29.5 | 7.05 |
+| Demand copies, copy-aware planner | 34.9 / 34.8 | 29.7 / 30.0 | 0 |
+
+| Arm | Optional experts computed on remote copies | Optional experts computed locally | Main engine CPU, one-core % | Remote CPU-helper process, one-core % |
+|---|---:|---:|---:|---:|
+| Legacy | 33975 | 25123 | 179.1 | 445.8 |
+| Demand | 39232 | 18333 | 177.6 | 449.9 |
+| Demand + copy-aware | 56954 | 0 | 168.6 | 455.3 |
+
+CPU percentages are process CPU-time deltas over the unchanged harness run,
+averaged across its two passes. 100% means one CPU core's time; the main row
+measures the native engine, not the whole PC. Busy polling is included, which
+is why a 68% increase in copied-expert computation does not imply a 68%
+increase in process CPU utilization. The main engine's CPU-time reduction was
+about 5.8%; temperature and noise were not measured.
+
+The combined candidate moved the optional work off the main CPU while keeping
+throughput near the production reference. Its observed mean gains were about
+1.8% chat and 2.4% code, within the prior approximately 3% variation; these
+sequential, single-start arms do not establish a reliable speed gain.
+Code PCIe fetches averaged 59.1 / 58.2 / 60.95 per token for the three arms.
+Copy hashes all matched at close (3862/3862, 3854/3854, 3856/3856).
+
+The profile and policy remain opt-in; no deployment promotion was made.
+Run identifier: `codex-copy-profile-cc80982-20261027`.
+Profile SHA-256:
+`654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7`.
