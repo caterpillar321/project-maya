@@ -6,6 +6,7 @@
 // serial reference kernels - the values agree to float rounding, which the fast-vs-reference check in
 // glm_pack_test pins on the real model.
 #include "strata/kernels/glm_fast.hpp"
+#include "strata/kernels/copy_lane_policy.hpp"
 #include "strata/kernels/exl3.hpp"
 #if defined(STRATA_USE_HIP)
 #include "strata/kernels/glm_expert_bench.hpp"
@@ -4088,21 +4089,37 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         if (lane_plan) {
             int f_ram = 0, ri[8];
             unsigned int rcnt[8];
+            unsigned copy_eligible = 0;
+            int copies = 0, mandatory = 0, shared = 0;
+            const bool copy_aware = a.d.copy_kind != nullptr && a.d.copy_lane_plan != nullptr;
             for (int i = 0; i < a.k; ++i) {
                 const size_t key = (size_t) a.layer * E + s_ids[i];
                 const unsigned int c = s_cnt[i];
+                const unsigned kind = copy_aware ? a.d.copy_kind[key] : 0;
+                if (copy_aware && i < skip_from && !light_miss(i) && s_tab[i] == 0ull &&
+                    (kind & strata::kernels::copy_lane::kHelper)) {
+                    shared = 1;
+                    mandatory += (kind & strata::kernels::copy_lane::kHelperRam) != 0;
+                }
                 if (i < skip_from && !light_miss(i) && s_tab[i] == 0ull && s_rtab[i] != 0ull &&
                     !(a.d.helper_owned && a.d.helper_owned[key])) {
                     ri[f_ram] = i;
                     rcnt[f_ram++] = c;
+                    if (kind & strata::kernels::copy_lane::kCopy) copy_eligible |= 1u << i, ++copies;
                 }
             }
-            const int to_cpu = (int) ((a.cpu_plan >> (4 * f_ram)) & 15ull);
-            for (int t = 0; t < to_cpu && t < f_ram; ++t) {
-                int best = -1;
-                for (int j = 0; j < f_ram; ++j)
-                    if (((host_set >> ri[j]) & 1u) == 0u && (best < 0 || rcnt[j] <= rcnt[best])) best = j;
-                host_set |= 1u << ri[best];
+            if (copy_aware) {
+                const auto plan = a.d.copy_lane_plan[(f_ram * 9 + mandatory) * 2 + shared];
+                const int take = (int) ((plan >> (4 * copies)) & 15ull);
+                host_set = strata::kernels::copy_lane::pick_cold(copy_eligible, s_cnt, take);
+            } else {
+                const int to_cpu = (int) ((a.cpu_plan >> (4 * f_ram)) & 15ull);
+                for (int t = 0; t < to_cpu && t < f_ram; ++t) {
+                    int best = -1;
+                    for (int j = 0; j < f_ram; ++j)
+                        if (((host_set >> ri[j]) & 1u) == 0u && (best < 0 || rcnt[j] <= rcnt[best])) best = j;
+                    host_set |= 1u << ri[best];
+                }
             }
         }
         for (int i = 0; i < a.k; ++i) {

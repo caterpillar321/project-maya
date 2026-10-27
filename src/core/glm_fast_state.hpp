@@ -700,6 +700,8 @@ struct Glm5Model::FastState {
     std::vector<uint8_t> copy_of;
     int copy_j = 0;
     uint8_t copy_r[9][9][2] = {};
+    uint8_t* copy_kind_d = nullptr;
+    unsigned long long* copy_lane_plan_d = nullptr;
     std::vector<strata::core::netproto::HashRef> copy_refs;
     std::vector<uint64_t> copy_hash;
     std::atomic<uint64_t> copy_sent{0}, copy_routes{0}, copy_kept{0};

@@ -1153,6 +1153,9 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
+  add_executable(copy_lane_policy_test tests/copy_lane_policy_test.cpp)
+  target_include_directories(copy_lane_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME copy_lane_policy_test COMMAND copy_lane_policy_test)
   # Model-level checks may be absent from source distributions.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)

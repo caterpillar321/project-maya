@@ -19,6 +19,7 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/glm_model.hpp"
 #include "strata/kernels/glm_fast.hpp"
+#include "strata/kernels/copy_lane_policy.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/exl3_cpu.hpp"
@@ -2216,6 +2217,38 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
             const double cl = local ? F->cpu_c_ms : 1e9, p = F->cpu_p_ms;
             const double cr = envd("STRATA_GLM_NET_COPY_MS", 0.28), rtt = envd("STRATA_GLM_NET_COPY_RTT", 0.35),
                          rtt_s = envd("STRATA_GLM_NET_COPY_RTT_SHARED", 0.10);
+            const char* cav = getenv("STRATA_GLM_COPY_AWARE");
+            if (cav != nullptr && std::atoi(cav) != 0) {
+                if (local) {
+                    err = "GLM copy-aware lane requires STRATA_GLM_NET_COPY_LOCAL=0";
+                    return false;
+                }
+                if (!(std::isfinite(p) && p > 0 && std::isfinite(cr) && cr > 0 &&
+                      std::isfinite(rtt) && rtt >= 0 && std::isfinite(rtt_s) && rtt_s >= 0)) {
+                    err = "GLM copy-aware lane requires finite positive expert costs and nonnegative trip costs";
+                    return false;
+                }
+                namespace clp = strata::kernels::copy_lane;
+                std::vector<uint8_t> kind((size_t) F->n_keys, 0);
+                for (int key = 0; key < F->n_keys; ++key) {
+                    if (F->copy_of[(size_t) key] != 0) kind[(size_t) key] |= clp::kCopy;
+                    if (F->net_of[(size_t) key] == copy_j) {
+                        kind[(size_t) key] |= clp::kHelper;
+                        if (h.owns_ram(key)) kind[(size_t) key] |= clp::kHelperRam;
+                    }
+                }
+                const auto cp = clp::make_plan(p, cr, rtt, rtt_s);
+                if (!glmfast::cuda_ok(cudaMalloc((void**) &F->copy_kind_d, kind.size()), "copy kind allocation", err) ||
+                    !glmfast::cuda_ok(cudaMalloc((void**) &F->copy_lane_plan_d, sizeof(cp)), "copy lane allocation", err) ||
+                    !glmfast::cuda_ok(cudaMemcpy(F->copy_kind_d, kind.data(), kind.size(), cudaMemcpyHostToDevice),
+                                     "copy kind upload", err) ||
+                    !glmfast::cuda_ok(cudaMemcpy(F->copy_lane_plan_d, cp.data(), sizeof(cp), cudaMemcpyHostToDevice),
+                                     "copy lane upload", err)) return false;
+                F->md.copy_kind = F->copy_kind_d;
+                F->md.copy_lane_plan = F->copy_lane_plan_d;
+                std::fprintf(stderr, "glm net copy: copy-aware GPU routing enabled; only copied RAM experts enter "
+                                     "the optional CPU lane, mandatory helper RAM work included in its budget\n");
+            }
             const auto split = [&](int k, int c, double rt, int& rb) {
                 double best = 1e18;
                 rb = 0;
@@ -4057,6 +4090,8 @@ void Glm5Model::fast_destroy() {
     }
     F->net.clear();
     if (F->helper_owned_d) cudaFree(F->helper_owned_d);
+    if (F->copy_kind_d) cudaFree(F->copy_kind_d);
+    if (F->copy_lane_plan_d) cudaFree(F->copy_lane_plan_d);
     if (F->cpu_ans_h) cudaFreeHost(F->cpu_ans_h);
     if (F->cpu_seq_d) cudaFree(F->cpu_seq_d);
     if (F->dcnt_d) cudaFree(F->dcnt_d);
