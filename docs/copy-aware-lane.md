@@ -66,3 +66,42 @@ It is a source snapshot, not a claim that every inherited experiment is validate
 or that the snapshot is bit-for-bit the source of a particular frozen binary.
 The original working tree and production executables are independent of this
 branch.
+
+## First speed comparison: 2026-10-27
+
+Commit `74bad15`, built for sm_120 with CUDA 13.0/GCC 11 and the portable GGML
+CPU backend. The existing Claude `qshort.py` and `qset_sets.py` were used
+unchanged: the first four chat and code questions, up to 200 generated tokens
+each, then the harness's 120-token greedy probe. Both new-policy arms used the
+same binary and production settings (IQ4_XS, 256K context, INT8 KV, MTP off,
+two network GPU helpers, 54 GiB remote RAM tier). Helpers stayed running.
+
+| Arm | Pass | Chat tok/s | Code tok/s | Chat PCIe fetches/token | Code PCIe fetches/token |
+|---|---:|---:|---:|---:|---:|
+| Frozen production reference | 1 | 34.4 | 29.2 | 43.0 | 59.0 |
+| New binary, policy off | 1 | 34.2 | 29.1 | 43.1 | 59.3 |
+| New binary, policy off | 2 | 34.3 | 29.0 | 43.4 | 59.6 |
+| New binary, policy on | 1 | 34.1 | 28.6 | 46.4 | 68.3 |
+| New binary, policy on | 2 | 33.9 | 28.6 | 47.4 | 67.8 |
+
+There is no demonstrated speed gain. The on/off mean differences are about
+-0.7% chat and -1.5% code, within the previously observed approximately 3%
+run-to-run variation. This was off then on with two passes per server, not a
+randomized multi-start study, so it does not establish a small regression.
+
+The intended placement change did work: optional local CPU fallback fell from
+about 4.3-4.6 experts/token in chat and 10.0 in code to zero. Code PCIe fetches
+rose about 14.5%. At close the off run checked 3851/3851 remote copies and the on
+run checked 3858/3858, all matching. These check weight integrity, not output
+equivalence. Greedy hashes differed between the two off passes too, and were
+not treated as a correctness gate.
+
+The results do not support treating all local CPU fallback as wasted work.
+Some of that work can overlap the GPU, so eliminating it can increase the GPU's
+critical path. Any later planner should compare useful local CPU execution,
+remote CPU execution and PCIe/GPU work rather than simply banning fallback.
+The experimental switch remains off; this candidate is not promoted.
+
+Run identifier: `codex-copy-lane-74bad15-20261027`.
+Unmodified qshort harness SHA-256:
+`278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64`.
