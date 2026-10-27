@@ -212,3 +212,53 @@ during the audit. New instrumentation is opt-in under `MAYA_GLM_PROF`.
 Run: `codex-bottleneck-a926aeb-20261027`. Local raw logs, routing traces, context
 timings and the machine-readable `audit-summary.json` are retained in the task's
 analysis directory. No production promotion was made.
+
+
+## Kohane helper RAM: user-reported DDR5-3200 → DDR5-5200
+
+After the helper PC reboot, the user reported a stable boot at 5200 MT/s.
+No BIOS settings or voltage were changed by this benchmark. A 180-second
+`stressapptest -W -M 49152 -m 12` completed with PASS, zero errors and zero
+hardware incidents. This is a short check, not proof of long-term stability.
+
+Both helper GPUs had stopped after the reboot. They were restarted using their
+previous binaries and GPU assignments; the CPU helper used six threads and
+54 GiB of RAM. The original helper launcher still contains an obsolete 86 GiB
+RAM limit, so its 18801 service was not started. The saved manual 54 GiB command
+was used instead. The main server was restarted for each test arm and restored
+to the original production configuration afterward.
+
+Run: `codex-ram5200-cc80982-20261027`. The same cc80982 binary, profile and
+unmodified Claude qshort harness were used as in the earlier 3200 run, with
+two passes per arm, 3440 generated tokens per arm. The binary SHA-256 is
+`73cb5bdb413462d4f638cdd5c12ee1055dff73b4173e20f4a0e8ab438e92ddcd`;
+the harness SHA-256 is
+`278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64`.
+
+| Routing | Set | Earlier 3200, tok/s | New 5200, tok/s | Mean change |
+|---|---|---|---|---|
+| Legacy | Chat | 34.1 / 34.4 | 34.4 / 34.5 | +0.6% |
+| Legacy | Code | 29.1 / 29.2 | 29.2 / 29.1 | 0.0% |
+| Demand + copy-aware | Chat | 34.9 / 34.8 | 35.0 / 35.1 | +0.6% |
+| Demand + copy-aware | Code | 29.7 / 30.0 | 30.3 / 31.0 | +2.7% |
+
+In the demand-aware arm, the recorded service-thread `net answers` stage fell
+from 0.416 to 0.362 ms/route (13.0%). The 18801 cumulative wait divided by its
+recorded route count fell from 0.565 to 0.482 ms/route (14.8%). These counters
+include transport/synchronization and overlapping work; they are not isolated
+CPU kernel durations and must not be added directly to token latency. Both
+runs kept optional main-CPU experts at zero and all copied experts matched
+their hashes at shutdown (3856/3856 earlier, 3855/3855 now).
+
+The direction is consistent with improved helper service latency, but the
+end-to-end gain is modest. This is a historical before/after comparison, not
+an interleaved RAM-frequency A/B test. Generated outputs, fetch counts and
+small startup cache-capacity differences varied, and +2.7% is within the
+previous roughly 3% run variation. It does not establish a precise causal
+RAM-speed uplift. The primary RAM-to-5090 fetch path was not changed.
+Twelve helper threads were not retested in this run.
+
+Raw logs and per-pass CPU statistics are saved under
+`/home/caterpillar/Agent/maya-analysis-20261027/runs/codex-ram5200-cc80982-20261027/`.
+The accessible kernel journal showed no matching hardware-memory error reports
+during the stress test or inference benchmark.
