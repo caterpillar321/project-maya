@@ -232,6 +232,10 @@ struct MoeDev {
     float* plan_w = nullptr;                   // [8]
     int* plan_id = nullptr;                    // [8]
     unsigned long long* fetch_src = nullptr;   // [8] host-mapped source (0 = nothing to fetch for entry i)
+    // Non-staggered private T3 only: earlier rows on the same stream have completed their fetches.
+    const unsigned long long* win_reuse_ptr = nullptr;      // [3][8] current layer's row plans
+    const int* win_reuse_id = nullptr;                      // [3][8] current layer's expert IDs
+    const unsigned long long* win_reuse_scratch = nullptr;  // [3][8] actual private scratch addresses
     unsigned long long* pf_src = nullptr;      // [8] the NEXT layer's predicted experts being prefetched: source,
     unsigned long long* pf_dst = nullptr;      // [8] ... their (claimed spare) slot,
     int* pf_n = nullptr;                       // ... and how many (the side-stream fetch kernel reads these)
@@ -290,7 +294,7 @@ struct MoeRequest {
     int win;                     // ... and the answer slot they go to: a verify window's token (0: the lone answer)
     int win_n;                   // a batched verify window's tokens (0: not one): their CPU lanes may run at once
     int win_rows;                // ... a batched rows step's group instead (STRATA_GLM_GROUP_EXPERTS): win the row,
-    int pad_;                    //     win_n the rows; their CPU lanes merged on this part's own pool
+    unsigned int reuse_mask;     // RAM experts reused from earlier private scratch; not another H2D fetch
     float x[4096];               // the FFN input, written only when cpu_mask != 0
     // ... and its q8_1 blocks (n_embd / 32 x 36 bytes, the trunk's own FFN-input quantization) when xq_ok: the net
     // helpers' kCompute2 sends these instead of x (MoeDev::req_xq set; 0: not written)

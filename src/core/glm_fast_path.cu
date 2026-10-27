@@ -1084,6 +1084,19 @@ bool Glm5Model::fast_setup(std::string& err) {
             }
             window_rows = (int) n;
         }
+        if (const char* v = getenv("STRATA_GLM_WIN_FETCH_REUSE")) {
+            if (std::strcmp(v, "0") != 0 && std::strcmp(v, "1") != 0) {
+                err = "MAYA_GLM_WIN_FETCH_REUSE must be 0 or 1";
+                return false;
+            }
+            F->win_fetch_reuse = std::strcmp(v, "1") == 0;
+            const char* stagger = getenv("STRATA_GLM_WIN_STAGGER");
+            if (F->win_fetch_reuse && (window_rows != 3 || n_parts_ != 1 ||
+                                     stagger == nullptr || std::strcmp(stagger, "0") != 0)) {
+                err = "MAYA_GLM_WIN_FETCH_REUSE needs WIN_SCRATCH_ROWS=3, WIN_STAGGER=0 and one trunk GPU";
+                return false;
+            }
+        }
         {
             const int grouped_rows = glmfast::group_experts_on() && rows_ != nullptr
                 ? std::min(rows_max(), n_parts_ > 1 ? split_rows_setting() : seq_count()) : 0;
@@ -4632,6 +4645,10 @@ void Glm5Model::fast_prof_flush() {
                                      "not_total_PCIe_or_DMA_completion\n",
                              m->dev_, ull(a.ram_fetch.count), ull(a.ram_fetch.bytes),
                              ull(a.disk_miss.count), ull(a.disk_miss.bytes), ull(a.prefetch.count), ull(a.prefetch.bytes));
+                if (F->win_fetch_reuse)
+                    std::fprintf(stderr, "glm window fetch reuse request CUDA%d: reuse_count=%llu reuse_bytes=%llu "
+                                         "(avoided RAM fetch payload; same-layer private scratch)\n", m->dev_,
+                                 ull(a.window_reuse.count), ull(a.window_reuse.bytes));
                 if (F->backing_bytes > 0) {
                     std::lock_guard<std::mutex> lk(F->mu);
                     std::fprintf(stderr, "glm RAM backing request CUDA%d: reuse_count=%llu reuse_bytes=%llu "
@@ -4915,6 +4932,7 @@ void Glm5Model::fast_service() {
             std::lock_guard<std::mutex> lk(F->mu);
             const int il = rq->layer;
             const unsigned int miss = rq->miss_mask, fetch = rq->fetch_mask, promo = rq->promo_mask;
+            const unsigned int reuse = rq->reuse_mask;
             const unsigned int cpu = rq->cpu_mask;   // the CPU lane's experts: not in VRAM, computed below
             const unsigned int skip = rq->skip_mask;   // DISK SKIP: left out of this token (neither hit nor read)
             if (F->tier_audit_on && F->tier_audit.takes_route(next)) {
@@ -4925,6 +4943,7 @@ void Glm5Model::fast_service() {
                 // The masks describe requested expert blobs, not helper work or measured bus transactions.
                 // SM fetch rounds each blob to 16 bytes; these counters retain the exact logical Ly.blob size.
                 a.ram_fetch.add((uint64_t) std::popcount(fetch), F->L[(size_t) il].blob);
+                a.window_reuse.add((uint64_t) std::popcount(reuse), F->L[(size_t) il].blob);
                 a.disk_miss.add((uint64_t) std::popcount(miss), F->L[(size_t) il].blob);
                 if (rq->pf_n > 0 && il + 1 < (int) F->L.size())
                     a.prefetch.add((uint64_t) std::min(rq->pf_n, 8), F->L[(size_t) il + 1].blob);
@@ -4947,6 +4966,7 @@ void Glm5Model::fast_service() {
                     for (int i = 0; i < K; ++i) std::fprintf(rf, " %d", ids[i]);
                     std::fprintf(rf, " %u %u %u |", fetch, miss, cpu);
                     for (int i = 0; i < 16 && rq->near_ids[i] >= 0; ++i) std::fprintf(rf, " %d", (int) rq->near_ids[i]);
+                    if (F->win_fetch_reuse) std::fprintf(rf, " | reuse %u", reuse);
                     std::fputc('\n', rf);
                 }
             }
@@ -4956,7 +4976,7 @@ void Glm5Model::fast_service() {
                 if (F->cnt[(size_t) key] < (1u << 24)) ++F->cnt[(size_t) key];
                 if (++F->usage[(size_t) key] >= (1u << 30))
                     for (auto& u : F->usage) u >>= 1;
-                const bool resident = (((miss | fetch | cpu | skip) >> i) & 1u) == 0;
+                const bool resident = (((miss | fetch | cpu | skip | reuse) >> i) & 1u) == 0;
                 if (resident) {
                     const int s = F->slot_of[(size_t) key];
                     if (s >= 0) P.tick[(size_t) s] = F->clock;
@@ -4980,7 +5000,7 @@ void Glm5Model::fast_service() {
                     // exclusive tiers: its RAM copy is released at the next boundary (the fetch reads it now)
                     const int rs = F->ram_of[(size_t) key];
                     if (rs >= 0 && R.st[(size_t) rs] == FastState::kRHold) R.st[(size_t) rs] = FastState::kRRelease;
-                } else if (((fetch | miss) >> i) & 1u) {
+                } else if (((fetch | miss | reuse) >> i) & 1u) {
                     F->scratch_uses.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -5000,11 +5020,11 @@ void Glm5Model::fast_service() {
                         bool in = false;
                         for (int q2 = 0; q2 < K; ++q2) in |= pv[(size_t) q2] == ids[i];
                         ov += in;
-                        if ((((fetch | miss) >> i) & 1u) && in) ++mh;
+                        if ((((fetch | miss | reuse) >> i) & 1u) && in) ++mh;
                     }
                     F->pred_n.fetch_add(1, std::memory_order_relaxed);
                     F->pred_overlap.fetch_add(ov, std::memory_order_relaxed);
-                    F->pred_miss.fetch_add((uint64_t) std::popcount((unsigned) (fetch | miss)), std::memory_order_relaxed);
+                    F->pred_miss.fetch_add((uint64_t) std::popcount((unsigned) (fetch | miss | reuse)), std::memory_order_relaxed);
                     F->pred_miss_hit.fetch_add(mh, std::memory_order_relaxed);
                 }
                 if (il + 1 < (int) F->pred_of.size())
@@ -5032,7 +5052,7 @@ void Glm5Model::fast_service() {
                 }
             }
             F->ram_hits.fetch_add((uint64_t) std::popcount((unsigned) (fetch)), std::memory_order_relaxed);
-            F->misses.fetch_add((uint64_t) std::popcount((unsigned) (fetch | miss | cpu)), std::memory_order_relaxed);
+            F->misses.fetch_add((uint64_t) std::popcount((unsigned) (fetch | miss | cpu | reuse)), std::memory_order_relaxed);
             if (F->n_ahead > 0) fast_ahead_route(il, ids, miss, rq->ahead);
             if (miss != 0) {
                 // ---- disk only: read each into a free RAM slot (it stays there unless it was promoted) or staging;

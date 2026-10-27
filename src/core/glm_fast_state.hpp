@@ -718,6 +718,8 @@ struct Glm5Model::FastState {
     int rows_group = 0;                        // allocated row capacity (0: no private row slots)
     int win_scratch_rows = 0;                  // opt-in window capacity, 2 or 3; 0 preserves shared scratch
     bool win_scratch_logged = false, win_scratch_fallback_logged = false;
+    bool win_fetch_reuse = false;              // opt-in reuse within one non-staggered private T3 layer
+    bool win_fetch_reuse_logged = false, win_fetch_reuse_fallback_logged = false;
     std::vector<uint8_t*> stage;   // pinned: disk reads when no RAM slot is free
     size_t stage_bytes = 0;        // ... each (an expert's blob); the start's uploads go through stage[0] too
     std::mutex mu;   // the service thread vs the between-token boundary
@@ -933,7 +935,7 @@ struct Glm5Model::FastState {
         struct Payload {
             uint64_t count = 0, bytes = 0;
             void add(uint64_t n, size_t blob) { count += n; bytes += n * (uint64_t) blob; }
-        } boundary_d2h, background_d2h, background_h2d, ram_fetch, disk_miss, prefetch, backing_reuse;
+        } boundary_d2h, background_d2h, background_h2d, ram_fetch, disk_miss, prefetch, backing_reuse, window_reuse;
         bool active = false, ready = false;
         uint64_t begin_expected = 0, end_expected = 0, boundaries = 0, routes = 0;
         uint64_t trunk_routes = 0, draft_routes = 0;

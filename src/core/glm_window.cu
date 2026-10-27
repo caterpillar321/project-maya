@@ -609,6 +609,19 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     // The full window must fit so its two groups cannot silently choose different scratch layouts.
     const bool private_scratch = F->win_scratch_rows > 0 && W.T <= F->win_scratch_rows &&
                                  W.T <= F->rows_group && F->rows_scr != nullptr && batched;
+    // A full T3 layer consumes every row before the next layer overwrites scratch. Staggered A(l+1) can
+    // overwrite A(l) before B(l) computes, so split groups must never share these private weights.
+    const bool fetch_reuse = F->win_fetch_reuse && private_scratch && batch_env && part == 0 &&
+                             t0 == 0 && T == 3 && W.T == 3 && !W.piped && n_parts_ == 1;
+    if (fetch_reuse && !F->win_fetch_reuse_logged) {
+        std::fprintf(stderr, "glm window fetch reuse: CUDA%d active for private T3, non-staggered full layers\n", dev_);
+        F->win_fetch_reuse_logged = true;
+    } else if (F->win_fetch_reuse && !fetch_reuse && !F->win_fetch_reuse_fallback_logged) {
+        std::fprintf(stderr, "glm window fetch reuse: CUDA%d inactive for this window (T=%d, rows=%d, part=%d, "
+                             "batched=%d, per-token=%d, piped=%d); original fetch path\n",
+                     dev_, W.T, T, part, (int) batched, (int) W.per_token, (int) W.piped);
+        F->win_fetch_reuse_fallback_logged = true;
+    }
     if (private_scratch && !F->win_scratch_logged) {
         std::fprintf(stderr, "glm window scratch: CUDA%d active for %d rows; absolute-row slots, shared claims bypassed\n",
                      dev_, W.T);
@@ -629,6 +642,11 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             mt.cpu_part = W.mcpu_part + (size_t) E * t;
             mt.cpu_flag = W.mcpu_flag + t;
             if (private_scratch) mt.scratch = F->rows_scr + 8 * t;
+            if (fetch_reuse) {
+                mt.win_reuse_ptr = W.mplan_ptr;
+                mt.win_reuse_id = W.mplan_id;
+                mt.win_reuse_scratch = F->rows_scr;
+            }
             if (t > 0 && md.cpu_seq != nullptr) {
                 mt.cpu_seq = W.cpu_seq_w + 16 * t;
                 mt.cpu_ans = W.ans_d[t];

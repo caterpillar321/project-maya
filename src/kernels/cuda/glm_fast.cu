@@ -4064,7 +4064,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         }
         return;
     }
-    __shared__ unsigned int s_fetch, s_promo, s_cpu, s_skip;
+    __shared__ unsigned int s_fetch, s_promo, s_cpu, s_skip, s_reuse;
     __shared__ unsigned long long s_pp[8], s_cs[8];
     __shared__ int s_npf, s_pfid[8];
     __shared__ unsigned long long s_pfptr[8];
@@ -4081,7 +4081,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         double sum = 0.0;
         for (int i = 0; i < a.k; ++i) sum += (double) s_p[s_ids[i]];
         const float inv = (float) (a.norm_w ? 1.0 / fmax(sum, 6.103515625e-5) : 1.0);
-        unsigned int mask = 0, fetch = 0, promo = 0, cpu = 0, skip = 0;
+        unsigned int mask = 0, fetch = 0, promo = 0, cpu = 0, skip = 0, reuse = 0;
         unsigned long long* rtab = a.d.tab + a.d.n_keys;
         unsigned long long* spares = a.d.tab + 2 * (size_t) a.d.n_keys + (size_t) a.layer * kSpares;
         int next_spare = 0;
@@ -4192,9 +4192,29 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
                         }
                     } else {
                         ptr = a.d.scratch[i];
+                        // Keep helper/CPU/promotion admission above unchanged. Only a RAM -> private scratch
+                        // fallback may alias completed immutable weights from an earlier row of this T3 layer.
+                        if (src != 0ull && a.win > 0 && a.win < 3 && a.win_n == 3 && a.win_rows == 0 &&
+                            a.d.win_reuse_ptr != nullptr && a.d.win_reuse_id != nullptr &&
+                            a.d.win_reuse_scratch != nullptr) {
+                            for (int e = 0; e < 8 * a.win; ++e) {
+                                if ((e & 7) >= a.k) continue;   // unused plan entries are not written by the route
+                                if (a.d.win_reuse_id[e] != s_ids[i]) continue;
+                                const unsigned long long prior = a.d.win_reuse_ptr[e];
+                                if (prior == 0ull) continue;
+                                bool private_prior = false;
+                                for (int slot = 0; slot < 8 * a.win; ++slot)
+                                    if ((slot & 7) < a.k) private_prior |= prior == a.d.win_reuse_scratch[slot];
+                                if (!private_prior) continue;
+                                ptr = prior;
+                                src = 0ull;
+                                reuse |= 1u << i;
+                                break;
+                            }
+                        }
                     }
                     if (src != 0ull) fetch |= 1u << i;
-                    else mask |= 1u << i;   // only on disk: the host provides the source
+                    else if (((reuse >> i) & 1u) == 0u) mask |= 1u << i;   // disk: host provides the source
                 }
             }
             s_plan[i] = ptr;   // (out to the device's plan below, a thread an entry)
@@ -4205,6 +4225,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         s_promo = promo;
         s_cpu = cpu;
         s_skip = skip;
+        s_reuse = reuse;
         // PREFETCH: the predicted experts of the next layer that are not in VRAM but are in the RAM tier claim
         // that layer's spares now (one spare stays for its real misses); the side stream copies them while this
         // layer and the next one's attention compute, and the next route sees them as resident.  Only the
@@ -4294,7 +4315,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         q->win = a.win;
         q->win_n = a.win_n;
         q->win_rows = a.win_rows;
-        q->pad_ = 0;
+        q->reuse_mask = s_reuse;
         q->skip_mask = s_skip;
         for (int i = 0; i < 8; ++i) {
             const bool on = i < a.k;   // (the entries past k as the host never reads them: zero)
