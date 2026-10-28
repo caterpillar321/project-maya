@@ -609,12 +609,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     // The full window must fit so its two groups cannot silently choose different scratch layouts.
     const bool private_scratch = F->win_scratch_rows > 0 && W.T <= F->win_scratch_rows &&
                                  W.T <= F->rows_group && F->rows_scr != nullptr && batched;
-    // A full T3 layer consumes every row before the next layer overwrites scratch. Staggered A(l+1) can
+    // A full T2/T3 layer consumes every row before the next layer overwrites scratch. Staggered A(l+1) can
     // overwrite A(l) before B(l) computes, so split groups must never share these private weights.
     const bool fetch_reuse = F->win_fetch_reuse && private_scratch && batch_env && part == 0 &&
-                             t0 == 0 && T == 3 && W.T == 3 && !W.piped && n_parts_ == 1;
+                             t0 == 0 && (T == 2 || T == 3) && W.T == T && !W.piped && n_parts_ == 1;
     if (fetch_reuse && !F->win_fetch_reuse_logged) {
-        std::fprintf(stderr, "glm window fetch reuse: CUDA%d active for private T3, non-staggered full layers\n", dev_);
+        std::fprintf(stderr, "glm window fetch reuse: CUDA%d active for private T%d, non-staggered full layers\n", dev_, T);
         F->win_fetch_reuse_logged = true;
     } else if (F->win_fetch_reuse && !fetch_reuse && !F->win_fetch_reuse_fallback_logged) {
         std::fprintf(stderr, "glm window fetch reuse: CUDA%d inactive for this window (T=%d, rows=%d, part=%d, "

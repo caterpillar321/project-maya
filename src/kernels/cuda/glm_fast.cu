@@ -4193,8 +4193,8 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
                     } else {
                         ptr = a.d.scratch[i];
                         // Keep helper/CPU/promotion admission above unchanged. Only a RAM -> private scratch
-                        // fallback may alias completed immutable weights from an earlier row of this T3 layer.
-                        if (src != 0ull && a.win > 0 && a.win < 3 && a.win_n == 3 && a.win_rows == 0 &&
+                        // fallback may alias completed immutable weights from an earlier row of this T2/T3 layer.
+                        if (src != 0ull && (a.win_n == 2 || a.win_n == 3) && a.win > 0 && a.win < a.win_n && a.win_rows == 0 &&
                             a.d.win_reuse_ptr != nullptr && a.d.win_reuse_id != nullptr &&
                             a.d.win_reuse_scratch != nullptr) {
                             for (int e = 0; e < 8 * a.win; ++e) {

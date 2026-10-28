@@ -718,7 +718,7 @@ struct Glm5Model::FastState {
     int rows_group = 0;                        // allocated row capacity (0: no private row slots)
     int win_scratch_rows = 0;                  // opt-in window capacity, 2 or 3; 0 preserves shared scratch
     bool win_scratch_logged = false, win_scratch_fallback_logged = false;
-    bool win_fetch_reuse = false;              // opt-in reuse within one non-staggered private T3 layer
+    bool win_fetch_reuse = false;              // opt-in reuse within one non-staggered private T2/T3 layer
     bool win_fetch_reuse_logged = false, win_fetch_reuse_fallback_logged = false;
     std::vector<uint8_t*> stage;   // pinned: disk reads when no RAM slot is free
     size_t stage_bytes = 0;        // ... each (an expert's blob); the start's uploads go through stage[0] too

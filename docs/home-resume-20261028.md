@@ -1,6 +1,37 @@
 # 집 GLM 작업 재개 메모 — 2026-10-28 후속 실험 완료
 
-## 최신 상태 — 16:56:45 기존 운영 복원 완료
+## 최신 상태 — 17:41:22 T2 재사용 측정 및 운영 복원 완료
+
+사용자께서 `한 번 더 소프트웨어 실험 → 보유 중인 265K/Z890 교체 비교` 순서에
+`ㄱㄱ`로 동의하셨습니다. 물리적인 부품 교체는 아직 하지 않았습니다.
+
+- T2/T3 full private window의 fetch reuse를 지원하도록 확장했습니다. defaultOFF,
+  stagger0/one-trunk/full-window 제한과 CPU/helper/promotion 정책을 유지합니다.
+- 집5090 단위 검사 PASS: T2복사16→12, T3복사24→17; 두 크기에서 각각3개 가중치
+  형식의 expert 출력, 총7,680float bitwise 일치. 경계·선택 정책 검사도 통과했습니다.
+- run `~/fn/codex-t2-reuse-20261028`: complete, restored=true, error/warning 없음.
+  OFF/ON 모두 fixed1/private3, 실제 T2이며 각 qshort 2회+긴 입력 첫/반복입니다.
+  채팅 38.80→39.00, 코드 33.75→34.00 tok/s. 약 0.5~0.7% 차이로,
+  두 회씩의 순차 측정만으로 반복 가능한 개선이라고 단정하지 않습니다.
+- 채팅/코드 mapped fetch+miss payload 2.23%/2.87% 감소, D2H 동일.
+  모든 20개 요청 쌍의 작업 계수 일치, OFF fetch=ON fetch+reuse, replay 0.
+  CPU 부하는 main 약175%, helper 약459%로 거의 같습니다.
+- 운영 engine PID306379 / PGID306367, helper18800 PID5151 / 18801 PID11615.
+  /health 정상과 실제 argv를 17:45~17:46 확인했습니다. 두 PC는 켜져 있습니다.
+  원래 운영 binary/config이며 새로운 MTP/reuse 설정은 기본값으로 승격하지 않았습니다.
+- test engine `~/fn/bin-test/maya-t2-reuse-20261028`, SHA256
+  `8f9c377fcbf067d4b9ed0365fe4e9c3f7d04ff19eb1e86e3221df156859ba0e6`.
+- 로컬 artifact `/home/caterpillar/Agent/maya-t2-reuse-20261028`.
+  main/kohane-before-swap.txt에 CPU·GPU UUID·PCIe 링크·driver·governor·binary/profile
+  hashes를 보존했습니다. 이 기록을 만들기 위해 SPD 조회나 RAM 부하 검사를 반복하지 않았습니다.
+- 현재 추가 소프트웨어 실험은 완료했습니다. 다음은 보유한 265K 교체 후
+  RAM5200과 같은 binary/plan/하네스로 P코어6→P코어8→P+E 비교입니다.
+  교체 후 GPU UUID, CPU topology, helper binary 호환성과 네트워크를 먼저 확인합니다.
+
+상세: [T2 재사용과 교체 기준](home-t2-fetch-reuse-20261028.md),
+[측정 JSON](home-t2-fetch-reuse-measurements-20261028.json).
+
+## 16:56:45 이전 실험 완료 시점 기록
 
 사용자의 `ㄱㄱㄱㄱㄱㄱ` 승인으로 MTP 네 조건, helper 계측 OFF/ON,
 기존 adaptive MTP(cap2/start1)까지136요청 측정을 완료했습니다.
@@ -31,7 +62,8 @@
 - SPD 조회가 벤치에 영향을 줬는지 사용자께서 질문하셨습니다. 16:35:47에
   두 호스트에서 지속 실행 중인 SPD 조회/메모리 테스트 후보를 찾지 못했습니다.
   다른 에이전트의 과거 실행 시각은 확인하지 않았으므로 겹침을 배제하지 않습니다.
-- 다음 후보: fixed1의 T2 fetch reuse 확장 검증, adaptive의 길이별 시간 추정·재탐색 계측.
+- 당시 다음 후보: fixed1의 T2 fetch reuse 확장 검증, adaptive의 길이별 시간 추정·재탐색 계측.
+  T2 확장 검증은 위 17:41 기록처럼 완료했고, adaptive 추가 변경은 하지 않았습니다.
   265K+Z890은 이미 가진 부품이지만 아직 실제 교체하지 않았습니다.
 
 상세: [후속 측정 보고서](home-mtp-helper-20261028.md),

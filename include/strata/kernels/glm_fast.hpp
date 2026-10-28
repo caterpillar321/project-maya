@@ -232,10 +232,10 @@ struct MoeDev {
     float* plan_w = nullptr;                   // [8]
     int* plan_id = nullptr;                    // [8]
     unsigned long long* fetch_src = nullptr;   // [8] host-mapped source (0 = nothing to fetch for entry i)
-    // Non-staggered private T3 only: earlier rows on the same stream have completed their fetches.
-    const unsigned long long* win_reuse_ptr = nullptr;      // [3][8] current layer's row plans
-    const int* win_reuse_id = nullptr;                      // [3][8] current layer's expert IDs
-    const unsigned long long* win_reuse_scratch = nullptr;  // [3][8] actual private scratch addresses
+    // Non-staggered private T2/T3 only: earlier rows on the same stream have completed their fetches.
+    const unsigned long long* win_reuse_ptr = nullptr;      // [T][8] current layer's row plans (T=2 or 3)
+    const int* win_reuse_id = nullptr;                      // [T][8] current layer's expert IDs
+    const unsigned long long* win_reuse_scratch = nullptr;  // [T][8] actual private scratch addresses
     unsigned long long* pf_src = nullptr;      // [8] the NEXT layer's predicted experts being prefetched: source,
     unsigned long long* pf_dst = nullptr;      // [8] ... their (claimed spare) slot,
     int* pf_n = nullptr;                       // ... and how many (the side-stream fetch kernel reads these)

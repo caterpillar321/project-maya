@@ -1091,9 +1091,9 @@ bool Glm5Model::fast_setup(std::string& err) {
             }
             F->win_fetch_reuse = std::strcmp(v, "1") == 0;
             const char* stagger = getenv("STRATA_GLM_WIN_STAGGER");
-            if (F->win_fetch_reuse && (window_rows != 3 || n_parts_ != 1 ||
+            if (F->win_fetch_reuse && ((window_rows != 2 && window_rows != 3) || n_parts_ != 1 ||
                                      stagger == nullptr || std::strcmp(stagger, "0") != 0)) {
-                err = "MAYA_GLM_WIN_FETCH_REUSE needs WIN_SCRATCH_ROWS=3, WIN_STAGGER=0 and one trunk GPU";
+                err = "MAYA_GLM_WIN_FETCH_REUSE needs WIN_SCRATCH_ROWS=2 or 3, WIN_STAGGER=0 and one trunk GPU";
                 return false;
             }
         }
