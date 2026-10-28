@@ -120,6 +120,10 @@ for reservation, prefill and class-allocation constraints.
 
 ## User-requested stop and next resume
 
+Historical checkpoint: the interrupted experiment below was subsequently repeated
+after the RAM replacement on October 28. Both OFF and ON completed; see the
+[completed window reuse comparison](home-window-fetch-reuse-20261028.md).
+
 At 2026-10-28 00:26 KST the user requested an immediate hold, saving work, and
 powering off both home PCs. No automatic continuation or wake-up is scheduled.
 

@@ -1,0 +1,776 @@
+{
+  "source": "/home/caterpillar/Agent/maya-fetch-reuse-resume-20261028/results.json",
+  "phase": "complete",
+  "restored": true,
+  "hashes": {
+    "binary_sha256": "6f6dc6c1f11a42bd96c8cfed0943a5e24373b76a8672abf80ff81a4f7e237856",
+    "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+    "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64"
+  },
+  "audit_complete": {
+    "window-reuse-off": true,
+    "window-reuse-on": true
+  },
+  "groups": {
+    "all": {
+      "off": {
+        "requests": 20,
+        "counts": {
+          "windows": 1556,
+          "rows": 4661,
+          "attempts": 1556,
+          "scratch_replays": 0,
+          "rounds": 1564,
+          "emitted_tokens": 3878,
+          "drafting_rounds": 1556,
+          "accepted_drafts": 2294,
+          "proposed_drafts": 3105
+        },
+        "tier": {
+          "boundaries": 1564,
+          "expected_routes": 199203,
+          "observed_routes": 199203,
+          "trunk_routes": 196098,
+          "draft_routes": 3105,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 63062,
+          "boundary_d2h_bytes": 844501876736,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 344,
+          "background_h2d_bytes": 4831313920,
+          "ram_fetch_count": 219877,
+          "ram_fetch_bytes": 2941357654016,
+          "disk_miss_count": 5079,
+          "disk_miss_bytes": 67953229824,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "mapped_fetch_and_miss_bytes": 3009310883840
+        },
+        "by_t_windows": {
+          "3": 1549,
+          "2": 7
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 68.44489010282776,
+          "draft_ms_per_round": 2.2473843187660667,
+          "verify_ms_per_round": 68.44539845758354,
+          "commit_cache_enqueue_ms_per_round": 0.2189717223650386,
+          "host_drafting_round_ms": 70.91175449871464
+        },
+        "acceptance_pct": 73.88083735909822,
+        "decode_loop_tokens_per_round": 2.4667519181585678,
+        "drafting_loop_tokens_per_round": 2.474293059125964,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 775995586.343476,
+        "prefill_engine_ms": 30916.0
+      },
+      "on": {
+        "requests": 20,
+        "counts": {
+          "windows": 1556,
+          "rows": 4661,
+          "attempts": 1556,
+          "scratch_replays": 0,
+          "rounds": 1564,
+          "emitted_tokens": 3878,
+          "drafting_rounds": 1556,
+          "accepted_drafts": 2294,
+          "proposed_drafts": 3105
+        },
+        "tier": {
+          "boundaries": 1564,
+          "expected_routes": 199203,
+          "observed_routes": 199203,
+          "trunk_routes": 196098,
+          "draft_routes": 3105,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 63062,
+          "boundary_d2h_bytes": 844501876736,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 344,
+          "background_h2d_bytes": 4831313920,
+          "ram_fetch_count": 201572,
+          "ram_fetch_bytes": 2696631812096,
+          "disk_miss_count": 5079,
+          "disk_miss_bytes": 67953229824,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "window_reuse_count": 18305,
+          "window_reuse_bytes": 244725841920,
+          "mapped_fetch_and_miss_bytes": 2764585041920
+        },
+        "by_t_windows": {
+          "3": 1549,
+          "2": 7
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 66.64088881748071,
+          "draft_ms_per_round": 2.108438303341902,
+          "verify_ms_per_round": 66.64189588688946,
+          "commit_cache_enqueue_ms_per_round": 0.21845115681233931,
+          "host_drafting_round_ms": 68.96878534704369
+        },
+        "acceptance_pct": 73.88083735909822,
+        "decode_loop_tokens_per_round": 2.4667519181585678,
+        "drafting_loop_tokens_per_round": 2.474293059125964,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 712889386.776689,
+        "prefill_engine_ms": 30865.7
+      },
+      "changes": {
+        "mapped_h2d_pct": -8.132288466245807,
+        "boundary_d2h_pct": 0.0,
+        "host_drafting_round_pct": -2.73998177792395,
+        "window_host_ms_pct": -2.635699001980729
+      }
+    },
+    "chat": {
+      "off": {
+        "requests": 8,
+        "counts": {
+          "windows": 690,
+          "rows": 2066,
+          "attempts": 690,
+          "scratch_replays": 0,
+          "rounds": 692,
+          "emitted_tokens": 1600,
+          "drafting_rounds": 690,
+          "accepted_drafts": 900,
+          "proposed_drafts": 1376
+        },
+        "tier": {
+          "boundaries": 692,
+          "expected_routes": 88232,
+          "observed_routes": 88232,
+          "trunk_routes": 86856,
+          "draft_routes": 1376,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 27371,
+          "boundary_d2h_bytes": 366504837120,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 61,
+          "background_h2d_bytes": 895483904,
+          "ram_fetch_count": 80720,
+          "ram_fetch_bytes": 1079854235648,
+          "disk_miss_count": 2073,
+          "disk_miss_bytes": 27741388800,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "mapped_fetch_and_miss_bytes": 1107595624448
+        },
+        "by_t_windows": {
+          "3": 686,
+          "2": 4
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 61.807717391304344,
+          "draft_ms_per_round": 2.339231884057971,
+          "verify_ms_per_round": 61.80769565217391,
+          "commit_cache_enqueue_ms_per_round": 0.2740869565217392,
+          "host_drafting_round_ms": 64.42101449275363
+        },
+        "acceptance_pct": 65.40697674418605,
+        "decode_loop_tokens_per_round": 2.300578034682081,
+        "drafting_loop_tokens_per_round": 2.3043478260869565,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 692247265.28,
+        "prefill_engine_ms": 8397.7
+      },
+      "on": {
+        "requests": 8,
+        "counts": {
+          "windows": 690,
+          "rows": 2066,
+          "attempts": 690,
+          "scratch_replays": 0,
+          "rounds": 692,
+          "emitted_tokens": 1600,
+          "drafting_rounds": 690,
+          "accepted_drafts": 900,
+          "proposed_drafts": 1376
+        },
+        "tier": {
+          "boundaries": 692,
+          "expected_routes": 88232,
+          "observed_routes": 88232,
+          "trunk_routes": 86856,
+          "draft_routes": 1376,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 27371,
+          "boundary_d2h_bytes": 366504837120,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 61,
+          "background_h2d_bytes": 895483904,
+          "ram_fetch_count": 75101,
+          "ram_fetch_bytes": 1004731891712,
+          "disk_miss_count": 2073,
+          "disk_miss_bytes": 27741388800,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "window_reuse_count": 5619,
+          "window_reuse_bytes": 75122343936,
+          "mapped_fetch_and_miss_bytes": 1032473280512
+        },
+        "by_t_windows": {
+          "3": 686,
+          "2": 4
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 60.48186956521739,
+          "draft_ms_per_round": 2.105927536231884,
+          "verify_ms_per_round": 60.48226086956522,
+          "commit_cache_enqueue_ms_per_round": 0.2740869565217392,
+          "host_drafting_round_ms": 62.86227536231885
+        },
+        "acceptance_pct": 65.40697674418605,
+        "decode_loop_tokens_per_round": 2.300578034682081,
+        "drafting_loop_tokens_per_round": 2.3043478260869565,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 645295800.32,
+        "prefill_engine_ms": 8353.199999999999
+      },
+      "changes": {
+        "mapped_h2d_pct": -6.782470269638274,
+        "boundary_d2h_pct": 0.0,
+        "host_drafting_round_pct": -2.4196128277522155,
+        "window_host_ms_pct": -2.1451169563389993,
+        "reported_tok_s_pct": 2.5034770514603677
+      },
+      "reported_tok_s": {
+        "off": {
+          "pass_tok_s": [
+            35.6,
+            36.3
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 35.95
+        },
+        "on": {
+          "pass_tok_s": [
+            36.6,
+            37.1
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 36.85
+        }
+      }
+    },
+    "code": {
+      "off": {
+        "requests": 8,
+        "counts": {
+          "windows": 607,
+          "rows": 1818,
+          "attempts": 607,
+          "scratch_replays": 0,
+          "rounds": 611,
+          "emitted_tokens": 1600,
+          "drafting_rounds": 607,
+          "accepted_drafts": 981,
+          "proposed_drafts": 1211
+        },
+        "tier": {
+          "boundaries": 611,
+          "expected_routes": 77735,
+          "observed_routes": 77735,
+          "trunk_routes": 76524,
+          "draft_routes": 1211,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 24993,
+          "boundary_d2h_bytes": 334697857024,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 64,
+          "background_h2d_bytes": 939524096,
+          "ram_fetch_count": 100801,
+          "ram_fetch_bytes": 1348321673216,
+          "disk_miss_count": 2162,
+          "disk_miss_bytes": 28924706816,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "mapped_fetch_and_miss_bytes": 1377246380032
+        },
+        "by_t_windows": {
+          "2": 3,
+          "3": 604
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 74.68707907742998,
+          "draft_ms_per_round": 2.1459967051070836,
+          "verify_ms_per_round": 74.68897858319606,
+          "commit_cache_enqueue_ms_per_round": 0.1729324546952224,
+          "host_drafting_round_ms": 77.00790774299837
+        },
+        "acceptance_pct": 81.0074318744839,
+        "decode_loop_tokens_per_round": 2.6055646481178396,
+        "drafting_loop_tokens_per_round": 2.616144975288303,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 860778987.52,
+        "prefill_engine_ms": 8208.4
+      },
+      "on": {
+        "requests": 8,
+        "counts": {
+          "windows": 607,
+          "rows": 1818,
+          "attempts": 607,
+          "scratch_replays": 0,
+          "rounds": 611,
+          "emitted_tokens": 1600,
+          "drafting_rounds": 607,
+          "accepted_drafts": 981,
+          "proposed_drafts": 1211
+        },
+        "tier": {
+          "boundaries": 611,
+          "expected_routes": 77735,
+          "observed_routes": 77735,
+          "trunk_routes": 76524,
+          "draft_routes": 1211,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 24993,
+          "boundary_d2h_bytes": 334697857024,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 64,
+          "background_h2d_bytes": 939524096,
+          "ram_fetch_count": 92074,
+          "ram_fetch_bytes": 1231647408128,
+          "disk_miss_count": 2162,
+          "disk_miss_bytes": 28924706816,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "window_reuse_count": 8727,
+          "window_reuse_bytes": 116674265088,
+          "mapped_fetch_and_miss_bytes": 1260572114944
+        },
+        "by_t_windows": {
+          "2": 3,
+          "3": 604
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 72.54534431630972,
+          "draft_ms_per_round": 2.0656507413509058,
+          "verify_ms_per_round": 72.54698517298189,
+          "commit_cache_enqueue_ms_per_round": 0.1715980230642504,
+          "host_drafting_round_ms": 74.78423393739705
+        },
+        "acceptance_pct": 81.0074318744839,
+        "decode_loop_tokens_per_round": 2.6055646481178396,
+        "drafting_loop_tokens_per_round": 2.616144975288303,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 787857571.84,
+        "prefill_engine_ms": 8227.000000000002
+      },
+      "changes": {
+        "mapped_h2d_pct": -8.471560846309078,
+        "boundary_d2h_pct": 0.0,
+        "host_drafting_round_pct": -2.8875915094622173,
+        "window_host_ms_pct": -2.867610820473876,
+        "reported_tok_s_pct": 2.9282576866764387
+      },
+      "reported_tok_s": {
+        "off": {
+          "pass_tok_s": [
+            33.4,
+            34.9
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 34.15
+        },
+        "on": {
+          "pass_tok_s": [
+            34.5,
+            35.8
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 35.15
+        }
+      }
+    },
+    "greedy": {
+      "off": {
+        "requests": 2,
+        "counts": {
+          "windows": 86,
+          "rows": 258,
+          "attempts": 86,
+          "scratch_replays": 0,
+          "rounds": 88,
+          "emitted_tokens": 240,
+          "drafting_rounds": 86,
+          "accepted_drafts": 150,
+          "proposed_drafts": 172
+        },
+        "tier": {
+          "boundaries": 88,
+          "expected_routes": 11092,
+          "observed_routes": 11092,
+          "trunk_routes": 10920,
+          "draft_routes": 172,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 3591,
+          "boundary_d2h_bytes": 48090054656,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 16,
+          "background_h2d_bytes": 234881024,
+          "ram_fetch_count": 11798,
+          "ram_fetch_bytes": 157827465216,
+          "disk_miss_count": 232,
+          "disk_miss_bytes": 3103784960,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "mapped_fetch_and_miss_bytes": 160931250176
+        },
+        "by_t_windows": {
+          "3": 86
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 65.075,
+          "draft_ms_per_round": 2.08,
+          "verify_ms_per_round": 65.075,
+          "commit_cache_enqueue_ms_per_round": 0.18,
+          "host_drafting_round_ms": 67.33500000000001
+        },
+        "acceptance_pct": 87.20930232558139,
+        "decode_loop_tokens_per_round": 2.7045454545454546,
+        "drafting_loop_tokens_per_round": 2.744186046511628,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 670546875.7333333,
+        "prefill_engine_ms": 1670.5
+      },
+      "on": {
+        "requests": 2,
+        "counts": {
+          "windows": 86,
+          "rows": 258,
+          "attempts": 86,
+          "scratch_replays": 0,
+          "rounds": 88,
+          "emitted_tokens": 240,
+          "drafting_rounds": 86,
+          "accepted_drafts": 150,
+          "proposed_drafts": 172
+        },
+        "tier": {
+          "boundaries": 88,
+          "expected_routes": 11092,
+          "observed_routes": 11092,
+          "trunk_routes": 10920,
+          "draft_routes": 172,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 3591,
+          "boundary_d2h_bytes": 48090054656,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 16,
+          "background_h2d_bytes": 234881024,
+          "ram_fetch_count": 10815,
+          "ram_fetch_bytes": 144685400064,
+          "disk_miss_count": 232,
+          "disk_miss_bytes": 3103784960,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "window_reuse_count": 983,
+          "window_reuse_bytes": 13142065152,
+          "mapped_fetch_and_miss_bytes": 147789185024
+        },
+        "by_t_windows": {
+          "3": 86
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 63.063500000000005,
+          "draft_ms_per_round": 2.0549999999999997,
+          "verify_ms_per_round": 63.065000000000005,
+          "commit_cache_enqueue_ms_per_round": 0.18,
+          "host_drafting_round_ms": 65.30000000000001
+        },
+        "acceptance_pct": 87.20930232558139,
+        "decode_loop_tokens_per_round": 2.7045454545454546,
+        "drafting_loop_tokens_per_round": 2.744186046511628,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 615788270.9333333,
+        "prefill_engine_ms": 1687.3000000000002
+      },
+      "changes": {
+        "mapped_h2d_pct": -8.166260522817904,
+        "boundary_d2h_pct": 0.0,
+        "host_drafting_round_pct": -3.0222024207321563,
+        "window_host_ms_pct": -3.091048789857853
+      }
+    },
+    "context": {
+      "off": {
+        "requests": 2,
+        "counts": {
+          "windows": 173,
+          "rows": 519,
+          "attempts": 173,
+          "scratch_replays": 0,
+          "rounds": 173,
+          "emitted_tokens": 438,
+          "drafting_rounds": 173,
+          "accepted_drafts": 263,
+          "proposed_drafts": 346
+        },
+        "tier": {
+          "boundaries": 173,
+          "expected_routes": 22144,
+          "observed_routes": 22144,
+          "trunk_routes": 21798,
+          "draft_routes": 346,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 7107,
+          "boundary_d2h_bytes": 95209127936,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 203,
+          "background_h2d_bytes": 2761424896,
+          "ram_fetch_count": 26558,
+          "ram_fetch_bytes": 355354279936,
+          "disk_miss_count": 612,
+          "disk_miss_bytes": 8183349248,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "mapped_fetch_and_miss_bytes": 363537629184
+        },
+        "by_t_windows": {
+          "3": 173
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 74.69027167630058,
+          "draft_ms_per_round": 2.32,
+          "verify_ms_per_round": 74.68826589595376,
+          "commit_cache_enqueue_ms_per_round": 0.1800578034682081,
+          "host_drafting_round_ms": 77.18832369942196
+        },
+        "acceptance_pct": 76.01156069364161,
+        "decode_loop_tokens_per_round": 2.520231213872832,
+        "drafting_loop_tokens_per_round": 2.520231213872832,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 829994587.1780822,
+        "prefill_engine_ms": 12639.4
+      },
+      "on": {
+        "requests": 2,
+        "counts": {
+          "windows": 173,
+          "rows": 519,
+          "attempts": 173,
+          "scratch_replays": 0,
+          "rounds": 173,
+          "emitted_tokens": 438,
+          "drafting_rounds": 173,
+          "accepted_drafts": 263,
+          "proposed_drafts": 346
+        },
+        "tier": {
+          "boundaries": 173,
+          "expected_routes": 22144,
+          "observed_routes": 22144,
+          "trunk_routes": 21798,
+          "draft_routes": 346,
+          "metadata_missing": 0,
+          "service_pending": 0,
+          "boundary_d2h_count": 7107,
+          "boundary_d2h_bytes": 95209127936,
+          "background_d2h_count": 0,
+          "background_d2h_bytes": 0,
+          "background_h2d_count": 203,
+          "background_h2d_bytes": 2761424896,
+          "ram_fetch_count": 23582,
+          "ram_fetch_bytes": 315567112192,
+          "disk_miss_count": 612,
+          "disk_miss_bytes": 8183349248,
+          "prefetch_count": 0,
+          "prefetch_bytes": 0,
+          "window_reuse_count": 2976,
+          "window_reuse_bytes": 39787167744,
+          "mapped_fetch_and_miss_bytes": 323750461440
+        },
+        "by_t_windows": {
+          "3": 173
+        },
+        "timing": {
+          "inclusive_host_ms_per_window": 72.26732947976879,
+          "draft_ms_per_round": 2.29514450867052,
+          "verify_ms_per_round": 72.26832369942197,
+          "commit_cache_enqueue_ms_per_round": 0.1800578034682081,
+          "host_drafting_round_ms": 74.74352601156069
+        },
+        "acceptance_pct": 76.01156069364161,
+        "decode_loop_tokens_per_round": 2.520231213872832,
+        "drafting_loop_tokens_per_round": 2.520231213872832,
+        "emission_accounting_ok": true,
+        "mapped_fetch_and_miss_bytes_per_emitted": 739156304.6575342,
+        "prefill_engine_ms": 12598.2
+      },
+      "changes": {
+        "mapped_h2d_pct": -10.944442761896934,
+        "boundary_d2h_pct": 0.0,
+        "host_drafting_round_pct": -3.167315431517237,
+        "window_host_ms_pct": -3.2439863213144515
+      }
+    }
+  },
+  "request_work_differences": [],
+  "request_copy_accounting_differences": [],
+  "greedy_hashes": {
+    "off": [
+      "3dc5a157144ded2796f76eec5bf6051f",
+      "838b887bd6e3b4518dbff6a15c98dfc3"
+    ],
+    "on": [
+      "3dc5a157144ded2796f76eec5bf6051f",
+      "838b887bd6e3b4518dbff6a15c98dfc3"
+    ]
+  },
+  "cpu": {
+    "off": [
+      {
+        "main_engine_pct_one_core": 178.40925109975157,
+        "remote_helper_pct_one_core": 462.29677303278754,
+        "harness_wall_seconds": 59.08325905200036
+      },
+      {
+        "main_engine_pct_one_core": 178.92836999452902,
+        "remote_helper_pct_one_core": 461.86950140806533,
+        "harness_wall_seconds": 57.53140209299818
+      }
+    ],
+    "on": [
+      {
+        "main_engine_pct_one_core": 178.08291625622508,
+        "remote_helper_pct_one_core": 462.377031031826,
+        "harness_wall_seconds": 57.630457855000714
+      },
+      {
+        "main_engine_pct_one_core": 178.3450515405298,
+        "remote_helper_pct_one_core": 460.9833803618466,
+        "harness_wall_seconds": 56.379472898999666
+      }
+    ]
+  },
+  "startup_memory": {
+    "off": {
+      "prefill_borrow_mib": 9671,
+      "gpu_before_pool_gib": 11.47,
+      "gpu_total_gib": 31.44,
+      "expert_pool_gib": 18.46,
+      "pool_slots": 1466,
+      "main_pinned_ram_gib": 91.95,
+      "main_ram_slots": 7302,
+      "remote_cold_experts": 788,
+      "remote_cold_gib": 9.88,
+      "remote_copies": 3543,
+      "remote_copy_eligible": 7121,
+      "remote_copy_decimal_gb": 47.37
+    },
+    "on": {
+      "prefill_borrow_mib": 9671,
+      "gpu_before_pool_gib": 11.47,
+      "gpu_total_gib": 31.44,
+      "expert_pool_gib": 18.46,
+      "pool_slots": 1466,
+      "main_pinned_ram_gib": 91.95,
+      "main_ram_slots": 7302,
+      "remote_cold_experts": 788,
+      "remote_cold_gib": 9.88,
+      "remote_copies": 3543,
+      "remote_copy_eligible": 7121,
+      "remote_copy_decimal_gb": 47.37
+    }
+  },
+  "context": {
+    "off": [
+      {
+        "case": "long-first",
+        "wall_ms": 19624.963811998896,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 16524,
+          "prompt_ms": 12796.0,
+          "prompt_per_token_ms": 0.774,
+          "prompt_per_second": 1291.3,
+          "predicted_n": 219,
+          "predicted_ms": 6812.7,
+          "predicted_per_token_ms": 31.108,
+          "predicted_per_second": 32.1,
+          "draft_n": 172,
+          "draft_n_accepted": 132
+        },
+        "outside_native_ms": 16.263811998896017,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      },
+      {
+        "case": "long-repeat",
+        "wall_ms": 6628.627761001553,
+        "timings": {
+          "cache_n": 16523,
+          "prompt_n": 1,
+          "prompt_ms": 36.6,
+          "prompt_per_token_ms": 36.6,
+          "prompt_per_second": 27.3,
+          "predicted_n": 219,
+          "predicted_ms": 6541.1,
+          "predicted_per_token_ms": 29.868,
+          "predicted_per_second": 33.5,
+          "draft_n": 174,
+          "draft_n_accepted": 131
+        },
+        "outside_native_ms": 50.927761001552426,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      }
+    ],
+    "on": [
+      {
+        "case": "long-first",
+        "wall_ms": 19371.09925900222,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 16524,
+          "prompt_ms": 12755.3,
+          "prompt_per_token_ms": 0.772,
+          "prompt_per_second": 1295.5,
+          "predicted_n": 219,
+          "predicted_ms": 6599.6,
+          "predicted_per_token_ms": 30.135,
+          "predicted_per_second": 33.2,
+          "draft_n": 172,
+          "draft_n_accepted": 132
+        },
+        "outside_native_ms": 16.19925900222188,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      },
+      {
+        "case": "long-repeat",
+        "wall_ms": 6418.86764100127,
+        "timings": {
+          "cache_n": 16523,
+          "prompt_n": 1,
+          "prompt_ms": 36.5,
+          "prompt_per_token_ms": 36.5,
+          "prompt_per_second": 27.4,
+          "predicted_n": 219,
+          "predicted_ms": 6331.4,
+          "predicted_per_token_ms": 28.911,
+          "predicted_per_second": 34.6,
+          "draft_n": 174,
+          "draft_n_accepted": 131
+        },
+        "outside_native_ms": 50.96764100127075,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      }
+    ]
+  }
+}
