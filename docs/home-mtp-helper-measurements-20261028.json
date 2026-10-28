@@ -1,0 +1,662 @@
+{
+  "mtp_matrix": {
+    "source": "/home/caterpillar/Agent/maya-mtp-helper-20261028/mtp-matrix-results.json",
+    "hashes": {
+      "binary_sha256": "6f6dc6c1f11a42bd96c8cfed0943a5e24373b76a8672abf80ff81a4f7e237856",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64"
+    },
+    "arms": {
+      "plain": {
+        "throughput": {
+          "chat": {
+            "pass_tok_s": [
+              36.4,
+              36.4
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 36.4
+          },
+          "code": {
+            "pass_tok_s": [
+              31.6,
+              31.8
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 31.700000000000003
+          }
+        },
+        "startup_memory": {
+          "prefill_borrow_mib": 7824,
+          "gpu_before_pool_gib": 10.83,
+          "gpu_total_gib": 31.44,
+          "expert_pool_gib": 19.11,
+          "pool_slots": 1519,
+          "main_pinned_ram_gib": 91.98,
+          "main_ram_slots": 7312,
+          "remote_cold_experts": 468,
+          "remote_cold_gib": 5.83,
+          "remote_copies": 3868,
+          "remote_copy_eligible": 7300,
+          "remote_copy_decimal_gb": 51.71
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 162.38944860827723,
+          "remote_helper_pct_one_core": 457.3797601813785,
+          "harness_wall_seconds": 59.73606167049911
+        },
+        "greedy_hashes": [
+          "bde9193a1a03c9647115830774e85fa6",
+          "bde9193a1a03c9647115830774e85fa6"
+        ],
+        "context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19282.93517000202,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12053.4,
+              "prompt_per_token_ms": 0.729,
+              "prompt_per_second": 1370.9,
+              "predicted_n": 225,
+              "predicted_ms": 7213.5,
+              "predicted_per_token_ms": 32.06,
+              "predicted_per_second": 31.2,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 16.035170002020095,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 7003.577283001505,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 33.6,
+              "prompt_per_token_ms": 33.6,
+              "prompt_per_second": 29.8,
+              "predicted_n": 225,
+              "predicted_ms": 6920.3,
+              "predicted_per_token_ms": 30.757,
+              "predicted_per_second": 32.5,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 49.67728300150429,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "audit_requests": 20,
+        "spec_groups": {},
+        "versus_plain_pct": {
+          "chat": 0.0,
+          "code": 0.0
+        }
+      },
+      "loaded0": {
+        "throughput": {
+          "chat": {
+            "pass_tok_s": [
+              35.7,
+              35.8
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 35.75
+          },
+          "code": {
+            "pass_tok_s": [
+              30.9,
+              31.1
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 31.0
+          }
+        },
+        "startup_memory": {
+          "prefill_borrow_mib": 9671,
+          "gpu_before_pool_gib": 11.47,
+          "gpu_total_gib": 31.44,
+          "expert_pool_gib": 18.46,
+          "pool_slots": 1466,
+          "main_pinned_ram_gib": 91.95,
+          "main_ram_slots": 7302,
+          "remote_cold_experts": 788,
+          "remote_cold_gib": 9.88,
+          "remote_copies": 3543,
+          "remote_copy_eligible": 7121,
+          "remote_copy_decimal_gb": 47.37
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 161.93381569505283,
+          "remote_helper_pct_one_core": 459.48639608153155,
+          "harness_wall_seconds": 61.259688450001704
+        },
+        "greedy_hashes": [
+          "bde9193a1a03c9647115830774e85fa6",
+          "bde9193a1a03c9647115830774e85fa6"
+        ],
+        "context": [
+          {
+            "case": "long-first",
+            "wall_ms": 20061.944041997776,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12742.8,
+              "prompt_per_token_ms": 0.771,
+              "prompt_per_second": 1296.7,
+              "predicted_n": 219,
+              "predicted_ms": 7301.5,
+              "predicted_per_token_ms": 33.34,
+              "predicted_per_second": 30.0,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 17.644041997777094,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 7015.51028600079,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 33.7,
+              "prompt_per_token_ms": 33.7,
+              "prompt_per_second": 29.7,
+              "predicted_n": 220,
+              "predicted_ms": 6931.4,
+              "predicted_per_token_ms": 31.506,
+              "predicted_per_second": 31.7,
+              "draft_n": 0,
+              "draft_n_accepted": 0
+            },
+            "outside_native_ms": 50.41028600079062,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "audit_requests": 20,
+        "spec_groups": {},
+        "versus_plain_pct": {
+          "chat": -1.7857142857142794,
+          "code": -2.208201892744488
+        }
+      },
+      "fixed1": {
+        "throughput": {
+          "chat": {
+            "pass_tok_s": [
+              38.8,
+              38.7
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 38.75
+          },
+          "code": {
+            "pass_tok_s": [
+              34.0,
+              33.4
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 33.7
+          }
+        },
+        "startup_memory": {
+          "prefill_borrow_mib": 9671,
+          "gpu_before_pool_gib": 11.47,
+          "gpu_total_gib": 31.44,
+          "expert_pool_gib": 18.46,
+          "pool_slots": 1466,
+          "main_pinned_ram_gib": 91.95,
+          "main_ram_slots": 7302,
+          "remote_cold_experts": 788,
+          "remote_cold_gib": 9.88,
+          "remote_copies": 3543,
+          "remote_copy_eligible": 7121,
+          "remote_copy_decimal_gb": 47.37
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 175.2378039173779,
+          "remote_helper_pct_one_core": 459.0858769966872,
+          "harness_wall_seconds": 57.15669852299834
+        },
+        "greedy_hashes": [
+          "3dc5a157144ded2796f76eec5bf6051f",
+          "bde9193a1a03c9647115830774e85fa6"
+        ],
+        "context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19530.601727998146,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12729.0,
+              "prompt_per_token_ms": 0.77,
+              "prompt_per_second": 1298.1,
+              "predicted_n": 225,
+              "predicted_ms": 6785.0,
+              "predicted_per_token_ms": 30.156,
+              "predicted_per_second": 33.2,
+              "draft_n": 117,
+              "draft_n_accepted": 107
+            },
+            "outside_native_ms": 16.60172799814609,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6640.271437998308,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 37.4,
+              "prompt_per_token_ms": 37.4,
+              "prompt_per_second": 26.7,
+              "predicted_n": 225,
+              "predicted_ms": 6552.0,
+              "predicted_per_token_ms": 29.12,
+              "predicted_per_second": 34.3,
+              "draft_n": 119,
+              "draft_n_accepted": 105
+            },
+            "outside_native_ms": 50.871437998308465,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "audit_requests": 20,
+        "spec_groups": {
+          "chat": {
+            "replays": 0,
+            "drafting_rounds": 856,
+            "emitted": 1600,
+            "rounds": 858,
+            "accepted": 734,
+            "proposed": 856,
+            "acceptance_pct": 85.74766355140187,
+            "rounds_by_draft_length": {
+              "0": 2,
+              "1": 856
+            },
+            "phase_ms": {
+              "draft_ms_per_round": 1.0956892523364488,
+              "verify_ms_per_round": 47.08441588785047,
+              "commit_cache_enqueue_ms_per_round": 0.023925233644859812
+            }
+          },
+          "code": {
+            "replays": 0,
+            "drafting_rounds": 839,
+            "emitted": 1600,
+            "rounds": 845,
+            "accepted": 747,
+            "proposed": 839,
+            "acceptance_pct": 89.03456495828367,
+            "rounds_by_draft_length": {
+              "1": 839,
+              "0": 6
+            },
+            "phase_ms": {
+              "draft_ms_per_round": 1.055351609058403,
+              "verify_ms_per_round": 55.28064362336115,
+              "commit_cache_enqueue_ms_per_round": 0.022550655542312278
+            }
+          }
+        },
+        "versus_plain_pct": {
+          "chat": 6.456043956043955,
+          "code": 6.309148264984232
+        }
+      },
+      "fixed2-reuse": {
+        "throughput": {
+          "chat": {
+            "pass_tok_s": [
+              36.7,
+              37.2
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 36.95
+          },
+          "code": {
+            "pass_tok_s": [
+              34.5,
+              35.9
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 35.2
+          }
+        },
+        "startup_memory": {
+          "prefill_borrow_mib": 9671,
+          "gpu_before_pool_gib": 11.47,
+          "gpu_total_gib": 31.44,
+          "expert_pool_gib": 18.46,
+          "pool_slots": 1466,
+          "main_pinned_ram_gib": 91.95,
+          "main_ram_slots": 7302,
+          "remote_cold_experts": 788,
+          "remote_cold_gib": 9.88,
+          "remote_copies": 3543,
+          "remote_copy_eligible": 7121,
+          "remote_copy_decimal_gb": 47.37
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 178.15883640285784,
+          "remote_helper_pct_one_core": 461.57040034492206,
+          "harness_wall_seconds": 56.930027239501214
+        },
+        "greedy_hashes": [
+          "3dc5a157144ded2796f76eec5bf6051f",
+          "838b887bd6e3b4518dbff6a15c98dfc3"
+        ],
+        "context": [
+          {
+            "case": "long-first",
+            "wall_ms": 19370.039817997167,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 16524,
+              "prompt_ms": 12762.5,
+              "prompt_per_token_ms": 0.772,
+              "prompt_per_second": 1294.7,
+              "predicted_n": 219,
+              "predicted_ms": 6590.4,
+              "predicted_per_token_ms": 30.093,
+              "predicted_per_second": 33.2,
+              "draft_n": 172,
+              "draft_n_accepted": 132
+            },
+            "outside_native_ms": 17.139817997167484,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          },
+          {
+            "case": "long-repeat",
+            "wall_ms": 6398.35050399779,
+            "timings": {
+              "cache_n": 16523,
+              "prompt_n": 1,
+              "prompt_ms": 36.8,
+              "prompt_per_token_ms": 36.8,
+              "prompt_per_second": 27.2,
+              "predicted_n": 219,
+              "predicted_ms": 6310.9,
+              "predicted_per_token_ms": 28.817,
+              "predicted_per_second": 34.7,
+              "draft_n": 174,
+              "draft_n_accepted": 131
+            },
+            "outside_native_ms": 50.65050399779011,
+            "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+          }
+        ],
+        "audit_requests": 20,
+        "spec_groups": {
+          "chat": {
+            "replays": 0,
+            "drafting_rounds": 690,
+            "emitted": 1600,
+            "rounds": 692,
+            "accepted": 900,
+            "proposed": 1376,
+            "acceptance_pct": 65.40697674418605,
+            "rounds_by_draft_length": {
+              "0": 2,
+              "2": 686,
+              "1": 4
+            },
+            "phase_ms": {
+              "draft_ms_per_round": 2.103463768115942,
+              "verify_ms_per_round": 60.403623188405795,
+              "commit_cache_enqueue_ms_per_round": 0.2740869565217392
+            }
+          },
+          "code": {
+            "replays": 0,
+            "drafting_rounds": 607,
+            "emitted": 1600,
+            "rounds": 611,
+            "accepted": 981,
+            "proposed": 1211,
+            "acceptance_pct": 81.0074318744839,
+            "rounds_by_draft_length": {
+              "1": 3,
+              "2": 604,
+              "0": 4
+            },
+            "phase_ms": {
+              "draft_ms_per_round": 2.063014827018122,
+              "verify_ms_per_round": 72.44584843492586,
+              "commit_cache_enqueue_ms_per_round": 0.1729324546952224
+            }
+          }
+        },
+        "versus_plain_pct": {
+          "chat": 1.5109890109890278,
+          "code": 11.041009463722396
+        }
+      }
+    },
+    "limitations": [
+      "Sequential arms; two qshort passes each, no randomized order or thermal control.",
+      "Greedy hashes and long-context output lengths differ across some arms/passes; this is not a matched-token replay.",
+      "loaded0 includes NextN cache maintenance and private scratch reservation, not solely a weights-allocation tax.",
+      "CPU utilization includes prefill and busy polling; one core is 100%.",
+      "Phase times are inclusive host observations; overlapping stages must not be summed as independent GPU costs."
+    ]
+  },
+  "helper_probe": {
+    "probe": {
+      "routes": 107400,
+      "covered": 107400,
+      "groups1": 94497,
+      "groups2": 6450,
+      "groups3": 1,
+      "cpu_occurrences": 144243,
+      "cpu_repeats": 211,
+      "cpu_weight_bytes": 1929959964672,
+      "cpu_repeat_bytes": 2820931584,
+      "fmt_errors": 0,
+      "probe_ms": 36.07,
+      "service_ms": 35719.822,
+      "gpu_ms": 3896.535,
+      "sampled_routes": 1678,
+      "sampled_service_ms": 561.934,
+      "sampled_pool_job_cpu_ms": 2791.343,
+      "pending_skip": 0,
+      "batched_candidate_request_pct": 12.013966480446927,
+      "cpu_repeat_pct": 0.14628092871057868,
+      "cpu_repeat_weight_pct": 0.14616529024628871,
+      "sampled_job_cpu_cores": 4.967385849583759
+    },
+    "rejected_metric": {
+      "sampled_process_cpu_ms": 17047.535,
+      "reason": "Sub-ms process-wide CPU deltas implied more than 30 CPU cores on a six-core CPU; do not use. Field removed from final source."
+    },
+    "paired_requests_with_equal_route_payload_and_mtp_counters": 18,
+    "greedy_hashes_paired_equal": true,
+    "arms": {
+      "helper-probe-off": {
+        "metrics_summary": {
+          "chat": {
+            "pass_tok_s": [
+              37.7,
+              37.3
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 37.5
+          },
+          "code": {
+            "pass_tok_s": [
+              34.3,
+              33.5
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 33.9
+          }
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 177.90238540012604,
+          "remote_helper_pct_one_core": 459.4548796840353,
+          "harness_wall_seconds": 57.857491953000135
+        }
+      },
+      "helper-probe-on": {
+        "metrics_summary": {
+          "chat": {
+            "pass_tok_s": [
+              37.7,
+              37.4
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 37.55
+          },
+          "code": {
+            "pass_tok_s": [
+              34.3,
+              33.5
+            ],
+            "arithmetic_mean_of_reported_pass_tok_s": 33.9
+          }
+        },
+        "cpu_mean": {
+          "main_engine_pct_one_core": 178.48225700552285,
+          "remote_helper_pct_one_core": 462.1642884604041,
+          "harness_wall_seconds": 57.434138258999155
+        }
+      }
+    },
+    "measured_binary_sha256": "4efc4d9e43d604d83fbbfeb9e4058d04d6cddd8de359c23b4c96744cc5346694",
+    "final_binary_sha256": "27405fc1ec75aa8ed72de2a257db5c7f41d2186ee8813a3247161322946e8fa1",
+    "limitations": [
+      "Disjoint non-consuming snapshots of already complete compatible FP32 requests, not every repeated expert across a window.",
+      "CPU payload is logical weight bytes, not measured DRAM traffic; cache hits are not subtracted.",
+      "CPU job clocks sampled every 64 FP32 requests; current-thread job CPU time does not measure socket-idle spinning, GPU waiting, serial quantization, or all other process work.",
+      "Final source only removes the rejected process-wide CPU-clock field; queue and per-thread job instrumentation are unchanged. Final binary build-checked but not separately deployed.",
+      "Same diagnostic helper binary OFF/ON; this differs from the original production helper binary used in the MTP matrix."
+    ]
+  },
+  "adaptive": {
+    "hashes": {
+      "binary_sha256": "6f6dc6c1f11a42bd96c8cfed0943a5e24373b76a8672abf80ff81a4f7e237856",
+      "profile_sha256": "654d083ac0bd196307a4a2b71f5aa753f91eb9bfb44a7b400f5514da30dbbea7",
+      "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64"
+    },
+    "metrics_summary": {
+      "chat": {
+        "pass_tok_s": [
+          37.3,
+          36.9
+        ],
+        "arithmetic_mean_of_reported_pass_tok_s": 37.099999999999994
+      },
+      "code": {
+        "pass_tok_s": [
+          34.8,
+          33.1
+        ],
+        "arithmetic_mean_of_reported_pass_tok_s": 33.95
+      }
+    },
+    "startup_memory": {
+      "prefill_borrow_mib": 9671,
+      "gpu_before_pool_gib": 11.47,
+      "gpu_total_gib": 31.44,
+      "expert_pool_gib": 18.46,
+      "pool_slots": 1466,
+      "main_pinned_ram_gib": 91.95,
+      "main_ram_slots": 7302,
+      "remote_cold_experts": 788,
+      "remote_cold_gib": 9.88,
+      "remote_copies": 3543,
+      "remote_copy_eligible": 7121,
+      "remote_copy_decimal_gb": 47.37
+    },
+    "context": [
+      {
+        "case": "long-first",
+        "wall_ms": 19437.68942799943,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 16524,
+          "prompt_ms": 12767.3,
+          "prompt_per_token_ms": 0.773,
+          "prompt_per_second": 1294.2,
+          "predicted_n": 224,
+          "predicted_ms": 6653.8,
+          "predicted_per_token_ms": 29.704,
+          "predicted_per_second": 33.7,
+          "draft_n": 166,
+          "draft_n_accepted": 131
+        },
+        "outside_native_ms": 16.58942799943088,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      },
+      {
+        "case": "long-repeat",
+        "wall_ms": 6543.169987999136,
+        "timings": {
+          "cache_n": 16523,
+          "prompt_n": 1,
+          "prompt_ms": 36.8,
+          "prompt_per_token_ms": 36.8,
+          "prompt_per_second": 27.2,
+          "predicted_n": 225,
+          "predicted_ms": 6455.9,
+          "predicted_per_token_ms": 28.693,
+          "predicted_per_second": 34.9,
+          "draft_n": 176,
+          "draft_n_accepted": 134
+        },
+        "outside_native_ms": 50.46998799913581,
+        "prompt_sha256": "701cb6748d594067836861ee6a7fe718fa333a3c4372ca29f9e0b88ba21bfb5b"
+      }
+    ],
+    "groups": {
+      "pass1-chat": {
+        "rounds_by_draft_length": {
+          "0": 17,
+          "1": 159,
+          "2": 210
+        },
+        "acceptance": {
+          "accepted_drafts": 410,
+          "proposed_drafts": 579,
+          "weighted_acceptance_pct": 70.81174438687393
+        }
+      },
+      "pass1-code": {
+        "rounds_by_draft_length": {
+          "0": 43,
+          "1": 197,
+          "2": 141
+        },
+        "acceptance": {
+          "accepted_drafts": 415,
+          "proposed_drafts": 479,
+          "weighted_acceptance_pct": 86.63883089770354
+        }
+      },
+      "pass2-chat": {
+        "rounds_by_draft_length": {
+          "1": 25,
+          "2": 325,
+          "0": 2
+        },
+        "acceptance": {
+          "accepted_drafts": 444,
+          "proposed_drafts": 675,
+          "weighted_acceptance_pct": 65.77777777777777
+        }
+      },
+      "pass2-code": {
+        "rounds_by_draft_length": {
+          "1": 215,
+          "2": 114,
+          "0": 108
+        },
+        "acceptance": {
+          "accepted_drafts": 359,
+          "proposed_drafts": 443,
+          "weighted_acceptance_pct": 81.03837471783295
+        }
+      }
+    },
+    "greedy_hashes": [
+      "bde9193a1a03c9647115830774e85fa6",
+      "3dc5a157144ded2796f76eec5bf6051f"
+    ]
+  }
+}

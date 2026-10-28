@@ -1,4 +1,43 @@
-# 집 GLM 작업 재개 메모 — 2026-10-28 15:56 KST 갱신
+# 집 GLM 작업 재개 메모 — 2026-10-28 후속 실험 완료
+
+## 최신 상태 — 16:56:45 기존 운영 복원 완료
+
+사용자의 `ㄱㄱㄱㄱㄱㄱ` 승인으로 MTP 네 조건, helper 계측 OFF/ON,
+기존 adaptive MTP(cap2/start1)까지136요청 측정을 완료했습니다.
+세 supervisor 모두 `complete`, `restored=true`, error없음입니다.
+운영 `/health` 정상, 메인 engine PID284053/PGID284050,
+코하네 helper18800 PID5151 / 18801 PID11615입니다. 두 PC 모두 켜져 있습니다.
+아래 15:56의 PID는 과거 기록이며, 실제 제어 전 /proc argv를 다시 확인합니다.
+
+- MTP 네 조건: 메인 `~/fn/codex-mtp-matrix-20261028`, supervisor261174 완료.
+  채팅/코드 평균: plain36.40/31.70, loaded0 35.75/31.00,
+  fixed1 38.75/33.70, fixed2+reuse36.95/35.20tok/s.
+- helper 계측 run `~/fn/codex-helper-probe-20261028` 완료.
+  18801만 진단 binary로 교체했다가 원래 것으로 복원했습니다. 현재 상태는 코하네
+  `~/fn-bin/kohane5200-helper-state.json`에서 읽어 실제 argv를 확인합니다.
+  새 binary `maya-helperd-queue-probe-20261028`, SHA256
+  `4efc4d9e43d604d83fbbfeb9e4058d04d6cddd8de359c23b4c96744cc5346694`.
+  현재 실행 중인 것은 원래 helper `maya-helperd-20261026`입니다.
+  107,400요청에서 즉시 묶을 후보의 CPU expert중복은211/144,243회(0.146%).
+  microbatch 실행 경로는 구현하지 않았습니다. 진단 옵션만 기본OFF로 추가했습니다.
+- adaptive `~/fn/codex-mtp-adaptive-20261028` 완료. 채팅37.10/코드33.95tok/s.
+  두 번째 채팅은 draft2를 주로, 코드는 draft0/1을 자주 골라 최적 고정값에 못 미쳤습니다.
+  새로운 제어기는 작성하지 않았고 기본값으로 승격하지 않았습니다.
+- 최종 진단 코드에서는 비현실적인 sub-ms 프로세스 CPU-clock 항목만 제거했습니다.
+  최종 binary SHA `27405fc1ec75aa8ed72de2a257db5c7f41d2186ee8813a3247161322946e8fa1`,
+  빌드 검사만 했고 추가 배포하지 않았습니다. 원시 측정 binary와 최종 binary는 로컬에 보존했습니다.
+- 로컬 원본·실행 스크립트·분석:
+  `/home/caterpillar/Agent/maya-mtp-helper-20261028`.
+- SPD 조회가 벤치에 영향을 줬는지 사용자께서 질문하셨습니다. 16:35:47에
+  두 호스트에서 지속 실행 중인 SPD 조회/메모리 테스트 후보를 찾지 못했습니다.
+  다른 에이전트의 과거 실행 시각은 확인하지 않았으므로 겹침을 배제하지 않습니다.
+- 다음 후보: fixed1의 T2 fetch reuse 확장 검증, adaptive의 길이별 시간 추정·재탐색 계측.
+  265K+Z890은 이미 가진 부품이지만 아직 실제 교체하지 않았습니다.
+
+상세: [후속 측정 보고서](home-mtp-helper-20261028.md),
+[측정 JSON](home-mtp-helper-measurements-20261028.json).
+
+## 15:56 완료 시점 기록
 
 ## 현재 상태
 

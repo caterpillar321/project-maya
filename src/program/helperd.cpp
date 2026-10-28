@@ -13,6 +13,7 @@
 #include "strata/core/net_helper.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
+#include "helper_queue_probe.hpp"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -22,6 +23,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <atomic>
 #include <cerrno>
@@ -47,6 +49,13 @@ int g_selftest = 0;
 int g_rows_check = 0;
 bool g_ram_cold = false;   // --ram-cold
 bool g_rows_serial = false;
+bool g_queue_probe = false;   // HELPERD_QUEUE_PROBE: diagnostics only; does not consume/batch requests
+
+uint64_t cpu_ns(clockid_t clock) {
+    timespec t{};
+    ::clock_gettime(clock, &t);
+    return (uint64_t) t.tv_sec * 1000000000 + (uint64_t) t.tv_nsec;
+}
 
 // A spinning pool: a route's CPU share is a fraction of a millisecond, too short to wake sleeping threads for.
 // The workers drop to short sleeps after 20 ms without work (between requests), so an idle helper is quiet.
@@ -60,6 +69,8 @@ public:
         for (auto& t : th_) t.join();
     }
     int size() const { return (int) th_.size() + 1; }
+    uint64_t work_ns() const { return work_ns_.load(std::memory_order_relaxed); }
+    void profile_work(bool enabled) { profile_work_.store(enabled, std::memory_order_relaxed); }
     void start(int jobs, std::function<void(int)> fn) {
         fn_ = std::move(fn);
         jobs_ = jobs;
@@ -78,7 +89,13 @@ private:
         for (;;) {
             const int j = next_.fetch_add(1, std::memory_order_acq_rel);
             if (j >= jobs_) return;
-            fn_(j);
+            if (g_queue_probe && profile_work_.load(std::memory_order_relaxed)) {
+                const uint64_t start = cpu_ns(CLOCK_THREAD_CPUTIME_ID);
+                fn_(j);
+                work_ns_.fetch_add(cpu_ns(CLOCK_THREAD_CPUTIME_ID) - start, std::memory_order_relaxed);
+            } else {
+                fn_(j);
+            }
             left_.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
@@ -104,6 +121,8 @@ private:
     int jobs_ = 0;
     std::atomic<int> next_{0}, left_{0};
     std::atomic<uint64_t> gen_{0};
+    std::atomic<uint64_t> work_ns_{0};
+    std::atomic<bool> profile_work_{false};
     std::atomic<bool> stop_{false};
 };
 
@@ -172,6 +191,59 @@ struct Session {
     std::vector<int> check_keys;
     std::vector<std::vector<uint8_t>> check_blob;
     std::vector<uint32_t> check_up;
+    std::vector<uint8_t> queue_scratch;
+    uint64_t probe_groups[4]{}, probe_routes = 0, probe_covered = 0, probe_cpu_occurrences = 0;
+    uint64_t probe_cpu_repeats = 0, probe_cpu_bytes = 0, probe_cpu_repeat_bytes = 0, probe_fmt_errors = 0;
+    uint64_t probe_work_ns = 0;
+    uint64_t probe_sampled_routes = 0;
+    double probe_ms = 0, probe_service_ms = 0, probe_gpu_ms = 0, probe_sampled_service_ms = 0;
+    int probe_skip = 0;
+
+    void queue_probe(int fd, const np::ComputeReq& q) {
+        ++probe_routes;
+        // Disjoint hypothetical groups, not overlapping snapshots whose repeated experts would be overcounted.
+        if (probe_skip > 0) { --probe_skip; return; }
+        const auto start = std::chrono::steady_clock::now();
+        np::ComputeReq next[2]{};
+        const int n = strata::helper_probe::peek_ready(fd, n_embd, q, next, queue_scratch);
+        ++probe_groups[n + 1];
+        probe_covered += (uint64_t) n + 1;
+        probe_skip = n;
+        const np::ComputeReq* rows[3] = {&q, &next[0], &next[1]};
+        int seen[24]{}, used = 0;
+        std::string err;
+        const kc::NativeFmt* nf = nullptr;
+        for (int t = 0; t <= n; ++t) {
+            for (int e = 0; e < rows[t]->ne && e < 8; ++e) {
+                const int key = rows[t]->keys[e];
+                if (key < 0 || (size_t) key >= ram_off.size() || ram_off[(size_t) key] < 0) continue;
+                if (!nf && !(nf = fmt(q.gu_type, q.d_type, err))) { ++probe_fmt_errors; continue; }
+                const uint64_t bytes = (uint64_t) n_ff * (nf->gu_row + (nf->up_row ? nf->up_row : nf->gu_row)) +
+                                       (uint64_t) n_embd * nf->d_row;
+                ++probe_cpu_occurrences;
+                probe_cpu_bytes += bytes;
+                bool repeated = false;
+                for (int i = 0; i < used; ++i) repeated |= seen[i] == key;
+                if (repeated) { ++probe_cpu_repeats; probe_cpu_repeat_bytes += bytes; }
+                else seen[used++] = key;
+            }
+        }
+        probe_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    }
+    void print_queue_probe(const char* stage) const {
+        if (!g_queue_probe) return;
+        std::fprintf(stderr, "helperd queue probe %s: routes=%llu covered=%llu groups1=%llu groups2=%llu groups3=%llu "
+                             "cpu_occurrences=%llu cpu_repeats=%llu cpu_weight_bytes=%llu cpu_repeat_bytes=%llu "
+                             "fmt_errors=%llu probe_ms=%.3f service_ms=%.3f gpu_ms=%.3f "
+                             "sampled_routes=%llu sampled_service_ms=%.3f sampled_pool_job_cpu_ms=%.3f pending_skip=%d\n",
+                     stage, (unsigned long long) probe_routes, (unsigned long long) probe_covered,
+                     (unsigned long long) probe_groups[1], (unsigned long long) probe_groups[2],
+                     (unsigned long long) probe_groups[3], (unsigned long long) probe_cpu_occurrences,
+                     (unsigned long long) probe_cpu_repeats, (unsigned long long) probe_cpu_bytes,
+                     (unsigned long long) probe_cpu_repeat_bytes, (unsigned long long) probe_fmt_errors,
+                     probe_ms, probe_service_ms, probe_gpu_ms, (unsigned long long) probe_sampled_routes,
+                     probe_sampled_service_ms, probe_work_ns / 1e6, probe_skip);
+    }
 
     ~Session() {
         for (int f : shard_fd) if (f >= 0) ::close(f);
@@ -391,7 +463,13 @@ struct Session {
             if (h.len != sizeof(q) + (size_t) n_embd * sizeof(float) || !recv_all(fd, &q, sizeof(q))) return false;
             payload.resize((size_t) n_embd * sizeof(float));
             if (!recv_all(fd, payload.data(), payload.size())) return false;
+            if (g_queue_probe) queue_probe(fd, q);
             const auto t0 = std::chrono::steady_clock::now();
+            // Job clocks can perturb sub-ms work. Sample one in 64 routes; the queue snapshot remains on each
+            // disjoint group. These CPU counters describe only sampled service intervals, never socket-idle time.
+            const bool sample_cpu = g_queue_probe && probe_routes % 64 == 0;
+            const uint64_t work0 = sample_cpu && pool ? pool->work_ns() : 0;
+            if (g_queue_probe && pool) pool->profile_work(sample_cpu);
             const float* x = (const float*) payload.data();
             int gn = 0, cn = 0, gk[8];
             float gw[8], cw[8];
@@ -410,10 +488,13 @@ struct Session {
             // the CPU starts its gate/up rows, the GPU does its share meanwhile, then the CPU's down rows
             if (cn > 0) cpu_start(*nf, (size_t) q.down_off, q.limit, cn, cb, cu, x);
             if (gn > 0) {
+                const auto gpu0 = g_queue_probe ? std::chrono::steady_clock::now() : t0;
                 if (!helper.compute(q.gu_type, q.d_type, (size_t) q.down_off, q.limit, gn, gk, gw, x, out.data(), err)) {
                     if (cn > 0) pool->wait();
                     return fail(fd, err);
                 }
+                if (g_queue_probe)
+                    probe_gpu_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu0).count();
             } else {
                 std::fill(out.begin(), out.end(), 0.0f);
             }
@@ -426,6 +507,17 @@ struct Session {
                 ++cpu_routes;
             }
             ms_compute += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (g_queue_probe) {
+                const double service_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                probe_service_ms += service_ms;
+                if (sample_cpu) {
+                    ++probe_sampled_routes;
+                    probe_sampled_service_ms += service_ms;
+                    if (pool) probe_work_ns += pool->work_ns() - work0;
+                }
+                if (pool) pool->profile_work(false);
+                if (probe_routes % 10000 == 0) print_queue_probe("progress");
+            }
             // HELPERD_SELFTEST=N: the first N GPU experts are also kept on the CPU; their first route compares the two
             for (int i = 0; i < gn && !check_keys.empty(); ++i) {
                 size_t c = 0;
@@ -839,6 +931,8 @@ int main(int argc, char** argv) {
     if (const char* st = getenv("HELPERD_SELFTEST")) g_selftest = std::atoi(st);
     if (const char* rc = getenv("HELPERD_ROWS_CHECK")) g_rows_check = std::atoi(rc);
     if (const char* rs = getenv("HELPERD_ROWS_SERIAL")) g_rows_serial = std::atoi(rs) != 0;
+    if (const char* qp = getenv("HELPERD_QUEUE_PROBE")) g_queue_probe = std::atoi(qp) != 0;
+    if (g_queue_probe) std::fprintf(stderr, "helperd: queue probe enabled (no batching, bounded nonblocking peek, CPU job clocks)\n");
     if (g_ram_bytes > 0 && !kc::native_experts_available()) {
         std::fprintf(stderr, "helperd: --ram-gib needs the ggml-cpu path (STRATA_NATIVE_EXPERTS)\n");
         return 2;
@@ -885,6 +979,7 @@ int main(int argc, char** argv) {
                 }
             };
             while ((spin(), recv_all(fd, &h, sizeof(h))) && h.magic == np::kMagic && s.serve(fd, h)) {}
+            s.print_queue_probe("final");
             std::fprintf(stderr, "helperd: trunk %s gone: %llu experts held (%llu in RAM), %llu experts in %llu routes, "
                                  "%.1f ms computing; CPU %llu experts in %llu routes, %.1f ms past the GPU's share; prompt rows %llu in %llu layers: recv %.1f ms, compute %.1f ms (GPU %.1f), send %.1f ms\n",
                          who, (unsigned long long) s.inserted, (unsigned long long) s.ram_held,
