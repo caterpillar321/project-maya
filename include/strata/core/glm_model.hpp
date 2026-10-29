@@ -874,6 +874,8 @@ public:
                       StageWindowResult& result, std::string& err,
                       const strata::kernels::SamplerParams* sp = nullptr, bool capture_logits = false);
     bool stage_commit(int keep, std::string& err);
+    bool stage_prefill(const std::vector<int32_t>& tokens, int32_t next_token, const float* input,
+                       size_t input_floats, std::vector<float>& output, std::string& err);
     bool stage_discard(std::string& err); // front-only: discard one uncommitted speculative token
     bool stage_window_pending() const { return stage_window_pending_; }
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
@@ -884,12 +886,15 @@ public:
     bool stage_stream_token(int32_t token, int32_t next_guess, bool& hit, std::vector<float>& logits, std::string& err);
     bool stage_stream_finish(std::string& err);
 private:
+    uint64_t slot_save_local(std::vector<uint8_t>& data, std::string& err);
+    bool slot_load_local(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err);
     bool remote_stream_apply(int32_t token, int32_t next_guess, bool& hit, std::string& err);
     bool decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t max_new,
                               const std::function<bool(int)>& emit, int64_t& produced, std::string& err);
     std::unique_ptr<GlmRemoteStage> remote_front_;
     bool remote_token(int32_t token, std::string& err);
     bool remote_prefill(const std::vector<int32_t>& tokens, std::string& err);
+    bool remote_prefill_batched(const std::vector<int32_t>& tokens, int32_t next_token, std::string& err);
     struct StageWindowIO {
         const float* input = nullptr;
         StageWindowResult* result = nullptr;
@@ -964,6 +969,9 @@ public:
     // ---- the batched prompt path (src/core/glm_prefill.cu)
     struct PrefillState;
     PrefillState* pf_ = nullptr;
+    unsigned stage_prefill_reference_seen_ = 0; // diagnostics: one matched legacy cache schedule per size
+    const float* stage_prefill_input_ = nullptr;
+    std::vector<float>* stage_prefill_output_ = nullptr;
     // STRATA_GLM_PREFILL_CALC: this (waiting) part's share of another part's MoE layer, enqueued on this GPU
     struct CalcJob;
     bool prefill_calc(const CalcJob& job, std::string& err);

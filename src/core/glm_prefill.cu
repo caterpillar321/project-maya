@@ -2294,14 +2294,19 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     }();
     // (only while the MoE window holds every routed row: a windowed chunk - T x K past ~22K rows, ~2.7K tokens - places
     // its rows in pieces, and the net segment's rows are never placed; such chunks stage as before)
-    const bool net_pf = net_pf_max > 0 && T <= net_pf_max && (size_t) T * K <= (size_t) moe_window_rows((size_t) T, g) &&
-                        !F->net.empty() && !F->net_of.empty() && !F->helper_failed.load(std::memory_order_acquire);
+    const char* local_pf_env=getenv("STRATA_GLM_PREFILL_LOCAL_HELPER");
+    const bool local_pf=local_pf_env && std::strcmp(local_pf_env,"1")==0 && F->stage_ram_canonical &&
+                        F->helper.device()>=0 && !F->helper.integrated() && F->net.empty();
+    const bool net_pf = local_pf || (net_pf_max > 0 && T <= net_pf_max && (size_t) T * K <= (size_t) moe_window_rows((size_t) T, g) &&
+                        !F->net.empty() && !F->net_of.empty() && !F->helper_failed.load(std::memory_order_acquire));
+    const auto prompt_helper_owns=[&](size_t key){return local_pf ? F->helper.owns((int)key) : !F->net_of.empty() && F->net_of[key]!=0;};
     // STRATA_GLM_NET_PREFILL_TOK=0: the helpers answer each row (kRows); default: each token's weighted sum over its
     // rows there (kTokRows - a fifth of the bytes back, one kernel set a token), added into ffn after the combine
-    static const bool net_tok = [] {
+    static const bool net_tok_env = [] {
         const char* v = getenv("STRATA_GLM_NET_PREFILL_TOK");
         return v == nullptr || std::atoi(v) != 0;
     }();
+    const bool net_tok=local_pf || net_tok_env;
     // the experts of layer il that are neither resident in its main slots nor held by the RAM tier (ascending)
     const auto disk_only = [&](int il) {
         std::vector<int> v;
@@ -2317,7 +2322,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             if (rs >= 0 && (RC.st[(size_t) rs] == FastState::kRHold || RC.st[(size_t) rs] == FastState::kRHelper)) continue;
             const int vs = F->slot_of[(size_t) il * g.n_expert + e];   // a tail slot this prompt did not borrow
             if (vs >= 0 && P.st[(size_t) vs] == FastState::kResident) continue;
-            if (net_pf && F->net_of[(size_t) il * g.n_expert + e] != 0) continue;   // a net helper computes it
+            if (net_pf && prompt_helper_owns((size_t) il * g.n_expert + e)) continue;   // a net helper computes it
             v.push_back(e);
         }
         return v;
@@ -2509,6 +2514,13 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         const bool skip_output = tail_skip && il == g.n_layers - 1;
         if (S->trace) cudaEventRecord(S->tr[(size_t) il].start, s);
         hc_read(il == l0_ ? nullptr : S->ffn, Ly.hc_attn_fn, Ly.hc_attn_scale, Ly.hc_attn_base, Ly.attn_norm);
+        if (const char* path=getenv("STRATA_GLM_PREFILL_RESIDUAL_DIAG"); path && p0==0 && T==1) {
+            std::vector<float> row((size_t)4*E);
+            cudaStreamSynchronize(s);cudaMemcpy(row.data(),S->R,row.size()*sizeof(float),cudaMemcpyDeviceToHost);
+            if(FILE* f=std::fopen((std::string(path)+"-in-"+std::to_string(il)+".f32").c_str(),"wb")) {
+                std::fwrite(row.data(),sizeof(float),row.size(),f);std::fclose(f);
+            }
+        }
         S->mark("hc", s);
         // S->R: the layer's input rows - the DFlash drafter's features when it reads this layer (the stream means go
         // out through S->mixer, which this layer's mixer writes only after)
@@ -3042,7 +3054,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             for (const auto& cx : cpu_set) cpu_rows_n += S->h_counts[cx.e];
             std::vector<Staged> rest;
             for (const auto& st : staged) {
-                if (!st.dev && F->net_of[(size_t) il * g.n_expert + st.e] != 0) {
+                if (!st.dev && prompt_helper_owns((size_t) il * g.n_expert + st.e)) {
                     net_set.push_back(st);
                     net_rows_n += S->h_counts[st.e];
                 } else {
@@ -3050,7 +3062,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 }
             }
             // (their disk reads were left out of the reader's prediction: the window must hold their rows)
-            if (cpu_rows_n + net_rows_n > moe_window_rows((size_t) T, g) - (calc_on ? T : 0)) {
+            if (cpu_rows_n + (net_tok ? T : net_rows_n) > moe_window_rows((size_t) T, g) - (calc_on ? T : 0)) {
                 err = "glm prefill: the net helpers' rows do not fit the MoE window - set STRATA_GLM_PREFILL_WINDOW=0 "
                       "with STRATA_GLM_NET_PREFILL_MAX";
                 return false;
@@ -3183,6 +3195,85 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                     net_err = "glm prefill: the net rows' inputs did not come down";
                     return;
                 }
+                if (local_pf) {
+                    // Fixed local helper experts stay in their VRAM. Tile the rows so the helper's
+                    // existing ~512 MiB reserve suffices; inputs and weighted sums remain FP32.
+                    std::vector<int> ids((size_t)T*K);
+                    std::vector<float> weights((size_t)T*K);
+                    if (cudaMemcpyAsync(ids.data(),M.ids,ids.size()*sizeof(int),cudaMemcpyDeviceToHost,S->xs)!=cudaSuccess ||
+                        cudaMemcpyAsync(weights.data(),M.rw,weights.size()*sizeof(float),cudaMemcpyDeviceToHost,S->xs)!=cudaSuccess ||
+                        cudaStreamSynchronize(S->xs)!=cudaSuccess) {
+                        net_ok=false;net_err="local prefill helper route download failed";return;
+                    }
+                    cudaEventSynchronize(S->net_ev[net_par]);
+                    float* sum=S->net_h[net_par];std::fill(sum,sum+(size_t)T*E,0.0f);
+                    constexpr int tile=2048, max_rows=6144;
+                    for(int at=0;at<T;) {
+                        const int limit_tokens=std::min(tile,T-at);
+                        int count=0,owned_rows=0;
+                        std::vector<int> toks,counts,keys;
+                        std::vector<float> ws;
+                        for(int t=0;t<limit_tokens;++t) {
+                            int kk[8]={},num=0;float ww[8]={};
+                            for(int k=0;k<K;++k) {
+                                const int key=il*g.n_expert+ids[(size_t)(at+t)*K+k];
+                                if(F->helper.owns(key)){kk[num]=key;ww[num]=weights[(size_t)(at+t)*K+k];++num;}
+                            }
+                            if(owned_rows+num>max_rows)break;
+                            ++count;owned_rows+=num;
+                            if(!num)continue;
+                            toks.push_back(t);counts.push_back(num);
+                            keys.insert(keys.end(),kk,kk+8);ws.insert(ws.end(),ww,ww+8);
+                        }
+                        if(toks.empty()){at+=count;continue;}
+                        std::vector<float> answer(toks.size()*(size_t)E);
+                        if(!F->helper.compute_tok_mmq(gu,dt,doff,limit,count,S->x_h+(size_t)at*E,
+                             toks.size(),toks.data(),counts.data(),keys.data(),ws.data(),answer.data(),net_err)) {
+                            net_ok=false;return;
+                        }
+                        if (T<=33 && getenv("STRATA_GLM_PREFILL_LOCAL_HELPER_CHECK")) {
+                            // Compare the SAME batched expert arithmetic on the primary GPU, with a separately
+                            // loaded copy of these weights. Token GEMV uses another activation quantizer.
+                            const int groups=1;
+                            std::vector<int> unique;
+                            for(int j=0;j<groups;++j)for(int k=0;k<counts[j];++k)unique.push_back(keys[j*8+k]);
+                            std::sort(unique.begin(),unique.end());unique.erase(std::unique(unique.begin(),unique.end()),unique.end());
+                            const size_t stride=glmfast::expert_stride(NL.blob,gu,dt);
+                            GlmExpertHelper reference_helper;
+                            if(!reference_helper.open(dev_,E,g.n_ff_exp,{},net_err) ||
+                               !reference_helper.reserve(F->helper.owners().size(),(unique.size()*stride+255)&~size_t(255),net_err,64ull<<20)) {
+                                net_ok=false;return;
+                            }
+                            std::vector<uint8_t> blob(stride);
+                            for(int key:unique) {
+                                for(int role=0;role<3;++role)fast_read_part(il,key%g.n_expert,role,blob.data(),0,1);
+                                if(!reference_helper.insert(key,blob.data(),NL.blob,stride,net_err)){net_ok=false;return;}
+                            }
+                            std::vector<float> reference((size_t)groups*E);
+                            if(!reference_helper.compute_tok_mmq(gu,dt,doff,limit,count,S->x_h+(size_t)at*E,
+                                groups,toks.data(),counts.data(),keys.data(),ws.data(),reference.data(),net_err)) {
+                                net_ok=false;return;
+                            }
+                            double num=0,den=0,worst=0,peak=0;
+                            for(size_t j=0;j<reference.size();++j) {
+                                const double d=(double)answer[j]-reference[j];num+=d*d;den+=(double)reference[j]*reference[j];
+                                worst=std::max(worst,std::abs(d));peak=std::max(peak,std::abs((double)reference[j]));
+                                if(!std::isfinite(answer[j]) || !std::isfinite(reference[j])) {net_ok=false;net_err="nonfinite local helper result";return;}
+                            }
+                            const double rel=std::sqrt(num/std::max(den,1e-30)), maxrel=worst/std::max(peak,1e-30);
+                            std::fprintf(stderr,"local prefill helper MMQ check layer %d: %d groups, relative_l2 %.9g max_over_peak %.9g\n",il,groups,rel,maxrel);
+                            // Different GPU MMQ kernels can round a SwiGLU value onto opposite sides of
+                            // the existing Q8 activation bins. Bound the component discrepancy below 0.5%;
+                            // the separate state/transport and plain-vs-MTP tests retain their strict checks.
+                            if(rel>.005 || maxrel>.005) {net_ok=false;net_err="local MMQ helper differs from primary MMQ reference";return;}
+                        }
+                        for(size_t j=0;j<toks.size();++j)
+                            std::memcpy(sum+(size_t)(at+toks[j])*E,answer.data()+j*E,(size_t)E*sizeof(float));
+                        at+=count;
+                    }
+                    net_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+                    return;
+                }
                 const size_t nh = F->net.size();
                 if (net_tok) {   // each token's rows here as (token, key, weight), grouped by token; sums come back
                     std::vector<int> ids_h((size_t) T * K);
@@ -3302,6 +3393,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 net_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             });
         }
+        // Diagnostic reference uses the primary device too; serialize it before primary expert kernels
+        // so the per-device MMQ scratch slab cannot be shared by concurrent contexts.
+        if(local_pf && T<=33 && getenv("STRATA_GLM_PREFILL_LOCAL_HELPER_CHECK") && net_th.joinable())net_th.join();
         S->mark("plan", s);
         const double plan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp).count();
         S->ms_plan += plan_ms;
@@ -4153,7 +4247,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         if (cpu_nrows > 0)
             gb::moe_combine_add(M.OUTPc, cpu_r0, cpu_r0, cpu_r0 + cpu_nrows, M.pos, M.rw, T, K, E, S->ffn, s);
         if (net_nrows > 0) {
-            net_th.join();
+            if(net_th.joinable())net_th.join();
             if (!net_ok) {
                 F->helper_failed.store(true, std::memory_order_release);
                 err = net_err.empty() ? "glm prefill: a net helper's prompt rows failed" : net_err;
@@ -4483,7 +4577,7 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
         err = "glm stage: commit or reset before prefill";
         return false;
     }
-    if (remote_front_) return remote_prefill(tokens, err);
+    if (remote_front_) return pf_ ? remote_prefill_batched(tokens, next_token, err) : remote_prefill(tokens, err);
     prefill_next_ = next_token;
     if (fast_ == nullptr || tokens.empty()) return false;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())   // (a tail lent to the vision encoder: the
@@ -4537,6 +4631,107 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
     }
     cudaSetDevice(dev_);
     return ok;
+}
+
+// One committed remote prefill chunk. Reuse the existing layer-wise GEMM/MMQ implementation and
+// its expert-pool loan, but import/export the four FP32 residual streams instead of local peer copies.
+bool Glm5Model::stage_prefill(const std::vector<int32_t>& tokens, int32_t next_token, const float* input,
+                              size_t input_floats, std::vector<float>& output, std::string& err) {
+    output.clear();
+    const size_t n = tokens.size(), width = (size_t) g_.hc * g_.n_embd;
+    if (!stage_windows_enabled_ || !pf_ || !fast_ || split_next_ || stage_window_pending_ || stage_failed_ ||
+        n == 0 || n > stageproto::max_prefill_rows || pos_ > max_ctx_ - (int64_t) n ||
+        (l0_ == 0 ? input != nullptr || input_floats != 0 : input == nullptr || input_floats != n * width) ||
+        next_token < -1 || next_token >= g_.n_vocab) {
+        err = "invalid batched stage prefill state/shape"; return false;
+    }
+    for (size_t i = 0; i < n; ++i) if (tokens[i] < 0 || tokens[i] >= g_.n_vocab || image_row(pos_ + i)) {
+        err = "stage prefill: invalid token or unsupported image row"; return false;
+    }
+    cudaSetDevice(dev_);
+    FastState* F = fast_; PrefillState* S = pf_;
+    const int64_t p0 = pos_;
+    const int chunk = std::min<int64_t>(S->T, ((n + 63) / 64) * 64);
+    if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "stage prefill compute drain", err) ||
+        !glmfast::cuda_ok(cudaStreamSynchronize(F->ps), "stage prefill prefetch drain", err)) return false;
+    F->win.prefetch_pending = false;
+    prefill_next_ = next_token;
+    prefill_carve(chunk, p0 + n);
+    bool ok = prefill_lend(err);
+    if (l1_ < g_.n_layers) output.resize(n * width);
+    stage_prefill_input_ = input;
+    stage_prefill_output_ = l1_ < g_.n_layers ? &output : nullptr;
+    const auto started = std::chrono::steady_clock::now();
+    if (ok) ok = prefill_run(tokens, err);
+    stage_prefill_input_ = nullptr;
+    stage_prefill_output_ = nullptr;
+    std::string return_err;
+    if (!prefill_return(return_err)) { if (ok) err = return_err; ok = false; }
+    const unsigned ref_bit=n==1?1:n==2?2:n==16?4:n==33?8:0;
+    if (ok && l0_ == 0 && p0 == 0 && ref_bit && !(stage_prefill_reference_seen_ & ref_bit)) {
+        if (const char* ref=getenv("STRATA_GLM_PREFILL_FRONT_REFERENCE")) {
+            const std::string path=std::string(ref)+"-"+std::to_string(n)+".f32";
+            std::vector<float> expected(output.size());FILE* f=std::fopen(path.c_str(),"rb");
+            ok=f && std::fread(expected.data(),sizeof(float),expected.size(),f)==expected.size();
+            if(f)std::fclose(f);
+            if(ok)ok=std::memcmp(expected.data(),output.data(),output.size()*sizeof(float))==0;
+            if(!ok)err="remote front differs from legacy batched prefill on the same GPU";
+            stage_prefill_reference_seen_ |= ref_bit;
+            std::fprintf(stderr,"stage front legacy parity: %zu tokens, %s\n",n,ok?"EXACT":"FAIL");
+        }
+    }
+    if (!ok) { stage_failed_ = true; return false; }
+    pos_ = p0 + n; mtp_hx_pos_ = l1_ == g_.n_layers ? pos_ - 1 : -1;
+    last_tok_ = l1_ == g_.n_layers ? F->tok_h[0] : -1;
+    const double ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+    std::fprintf(stderr, "glm stage prefill: layers [%d,%d), %zu tokens, %.1f ms, %.1f tok/s\n", l0_, l1_, n, ms, n*1000/ms);
+    return true;
+}
+
+bool Glm5Model::remote_prefill_batched(const std::vector<int32_t>& tokens, int32_t next_token, std::string& err) {
+    if (tokens.empty()) return false;
+    // Keep the established short-prompt fallback; only a sufficiently large new suffix borrows the pool.
+    int64_t min_n = 32;
+    if (const char* v = getenv("STRATA_GLM_PREFILL_MIN")) min_n = std::max<int64_t>(1, std::atoll(v));
+    if ((int64_t) tokens.size() < min_n) return false;
+    if (pos_ > max_ctx_ - (int64_t) tokens.size()) { err = "remote prefill exceeds context"; return false; }
+    const auto started = std::chrono::steady_clock::now();
+    for (size_t at = 0; at < tokens.size();) {
+        const size_t T = std::min<size_t>(stageproto::max_prefill_rows, tokens.size()-at);
+        std::vector<int32_t> part(tokens.begin()+at, tokens.begin()+at+T);
+        const int32_t next = at+T < tokens.size() ? tokens[at+T] : next_token;
+        std::vector<float> residual, unused;
+        const char* pipe=getenv("STRATA_GLM_PREFILL_PIPE");
+        if(pipe && std::strcmp(pipe,"1")==0) {
+            const char* rows=getenv("STRATA_GLM_PREFILL_PIPE_ROWS");
+            int chunk=rows?std::clamp(std::atoi(rows),64,(int)stageproto::max_prefill_rows):8192;
+            // Do not pay a second expert sweep for a tiny tail just beyond a chunk boundary
+            // (e.g. Pi's 8,319-token system prompt with an 8,192-token target).
+            if(chunk>=1024 && T>(size_t)chunk && T%(size_t)chunk<(size_t)chunk/8) {
+                const size_t pieces=T/(size_t)chunk;
+                chunk=(int)std::min<size_t>(stageproto::max_prefill_rows,((T+pieces-1)/pieces+63)/64*64);
+            }
+            const auto progress=prefill_progress;
+            const auto consume=[&](size_t offset,const std::vector<float>& boundary,std::string& e) {
+                const size_t count=boundary.size()/((size_t)g_.hc*g_.n_embd);
+                std::vector<int32_t> local(part.begin()+offset,part.begin()+offset+count);
+                const int32_t local_next=offset+count<part.size()?part[offset+count]:next;
+                if(progress)prefill_progress=[&](int64_t done,int64_t){return progress(at+offset+done,tokens.size());};
+                const bool ok=stage_prefill(local,local_next,boundary.data(),boundary.size(),unused,e);
+                prefill_progress=progress;
+                return ok;
+            };
+            if(!remote_front_->prefill_stream(pos_,part,next,chunk,consume,err)){stage_failed_=true;return false;}
+        } else if (!remote_front_->prefill(pos_, part, next, residual, err) ||
+                   !stage_prefill(part, next, residual.data(), residual.size(), unused, err)) {
+            stage_failed_ = true; return false;
+        }
+        at += T;
+        if (prefill_progress && !prefill_progress(at, tokens.size())) { err = "cancelled"; return false; }
+    }
+    const double ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+    std::fprintf(stderr, "glm remote prefill: %zu tokens in %.1f ms (%.1f tok/s), FP32 boundary\n", tokens.size(), ms, tokens.size()*1000/ms);
+    return true;
 }
 
 // DUAL-LINK PROMPT setup, once: STRATA_GLM_DUAL_PREFILL=1, two parts that reach each other's memory - peer access
@@ -4740,6 +4935,10 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
         const int T = chunk_len(c);
         const int64_t i = (int64_t) c * Tc;
         if (!glmfast::cuda_ok(cudaStreamSynchronize(fast_->cs), "glm prompt embedding", err)) return false;
+        if (stage_prefill_input_) {
+            return glmfast::cuda_ok(cudaMemcpyAsync(S->R, stage_prefill_input_ + (size_t)i*4*E,
+                (size_t)T*4*E*sizeof(float), cudaMemcpyHostToDevice, fast_->cs), "remote prompt residual import", err);
+        }
         for (int t = 0; t < T; ++t) {
             tt->to_float(pack_emb_src_ + (size_t) tokens[(size_t) (i + t)] * row_b, S->emb_h + (size_t) t * E, E);
             if (const float* img = image_row(pos_start + i + t))   // an image's row in place of its <|image|> token
@@ -4850,6 +5049,30 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
                 if (!m->prefill_half(p0, T, err, nx.empty() ? nullptr : nx.data(), im.empty() ? nullptr : im.data()))
                     return false;
                 prev = m;
+            }
+            if (stage_windows_enabled_ && !split_next_) {
+                const size_t width=(size_t)4*E;
+                if (stage_prefill_output_) {
+                    if (!glmfast::cuda_ok(cudaMemcpyAsync(stage_prefill_output_->data()+(size_t)c*Tc*width,
+                        pf_->R,(size_t)T*width*sizeof(float),cudaMemcpyDeviceToHost,fast_->cs),"remote prompt residual export",err)) return false;
+                }
+                if (l1_ == g.n_layers) {
+                    gf::head_prep(pf_->R+(size_t)(T-1)*width,w_.at("output_norm.weight"),g.norm_eps,E,fast_->head_x,fast_->head_xq,fast_->cs);
+                    const WSlot& ow=ws_map_.at("output.weight");
+                    gf::MvJob job={ow.q,fast_->head_xq,fast_->head_x,sc_+sc_logits,nullptr,1.0f,ow.type,E,g.n_vocab};
+                    if(ow.type==0)job.w=ow.f32;
+                    if(!gf::mv(&job,1,fast_->cs)){err="stage prefill output head";return false;}
+                    gf::argmax(sc_+sc_logits,g.n_vocab,fast_->tok,fast_->cs);
+                    cudaMemcpyAsync(fast_->tok_h,fast_->tok,sizeof(int),cudaMemcpyDeviceToHost,fast_->cs);
+                    mtp_hx_pos_=p0+T-1;
+                }
+            }
+            if (const char* dump=getenv("STRATA_GLM_PREFILL_OUTPUT_DIAG"); dump && p0==0) {
+                std::vector<float> rows((size_t)T*4*E);cudaStreamSynchronize(fast_->cs);
+                cudaMemcpy(rows.data(),pf_->R,rows.size()*sizeof(float),cudaMemcpyDeviceToHost);
+                if(FILE* f=std::fopen((std::string(dump)+"-"+std::to_string(T)+".f32").c_str(),"wb")) {
+                    std::fwrite(rows.data(),sizeof(float),rows.size(),f);std::fclose(f);
+                }
             }
             pos_ = p0 + T;
             for (Glm5Model* m = split_next_.get(); m != nullptr; m = m->split_next_.get()) m->pos_ = pos_;

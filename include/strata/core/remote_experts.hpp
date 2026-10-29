@@ -23,7 +23,7 @@ public:
     GlmExpertHelper& operator=(const GlmExpertHelper&) = delete;
     bool open(int device, int n_embd, int n_ff,
               const std::vector<std::pair<void*, size_t>>& regions, std::string& err);
-    bool reserve(int keys, size_t requested_bytes, std::string& err);
+    bool reserve(int keys, size_t requested_bytes, std::string& err, size_t headroom = 512ull << 20);
     bool insert(int key, const uint8_t* host, size_t bytes, size_t stride, std::string& err);
     bool replace(int out, int in, const uint8_t* host, std::string& err);
     struct Swap { uint32_t gain; int in, out; };

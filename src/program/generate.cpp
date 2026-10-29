@@ -1571,7 +1571,7 @@ static int glm_pack_generate(const Options& o) {
     const int ckpt_max = model.fast() && model.seq_count() <= 1 && getenv("STRATA_GLM_NO_REUSE") == nullptr
                              ? std::max(0, std::min(16, (int) env_num("STRATA_GLM_CKPTS", 4)))
                              : 0;
-    const int64_t ckpt_every = std::max<int64_t>(0, (int64_t) env_num("STRATA_GLM_CKPT_EVERY", 16384));
+    const int64_t ckpt_every = std::max<int64_t>(0, (int64_t) env_num("STRATA_GLM_CKPT_EVERY", o.prompt_cache_every));
     // a prompt writes the state from position `from` on: the checkpoints past it no longer hold this conversation
     const auto ckpt_drop_past = [&](size_t from) {
         for (auto& c : ckpts)

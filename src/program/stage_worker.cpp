@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -99,6 +101,37 @@ int main(int argc, char** argv) {
         st::Header response = h; response.flags = st::reply;
         strata::core::Glm5Model::StageWindowResult result;
         int32_t next_prefetch = -1;
+        std::vector<uint8_t> slot_bytes;
+        if (ok && h.op == st::PrefillStream) {
+            ok=!streaming && !model.stage_window_pending() && !active_window && h.position==model.position() &&
+               h.rows>0 && h.rows<=st::max_prefill_rows && h.window==last_window+1 && data.size()==((size_t)h.rows+2)*sizeof(int32_t);
+            std::vector<int32_t> ids;
+            if(ok){ids.resize(h.rows+2);std::memcpy(ids.data(),data.data(),data.size());}
+            const int chunk=ok?ids[0]:0;
+            ok=ok && chunk>=1 && chunk<=(int)st::max_prefill_rows;
+            std::future<std::pair<bool,std::string>> sending;
+            for(size_t at=0;ok && at<h.rows;) {
+                const size_t count=std::min<size_t>(chunk,h.rows-at);
+                std::vector<int32_t> part(ids.begin()+1+at,ids.begin()+1+at+count);
+                std::vector<float> residual;
+                ok=model.stage_prefill(part,ids[1+at+count],nullptr,0,residual,err);
+                if(sending.valid()){auto sent=sending.get();if(!sent.first){ok=false;err=sent.second;}}
+                if(!ok)break;
+                st::Header frame=response;frame.position=model.position();frame.rows=count;
+                if(at+count<h.rows)frame.flags|=st::more;
+                sending=std::async(std::launch::async,[fd,frame,r=std::move(residual)](){
+                    std::string e;bool done=st::send_packet(fd,frame,r.data(),r.size()*sizeof(float),e);
+                    return std::make_pair(done,e);
+                });
+                at+=count;
+            }
+            if(sending.valid()){auto sent=sending.get();if(!sent.first){ok=false;err=sent.second;}}
+            if(ok){last_window=h.window;continue;}
+            if(err.empty())err="invalid streamed prefill request";
+            response.flags=st::reply|st::failure;
+            std::string io_error;st::send_packet(fd,response,err.data(),std::min<size_t>(1024,err.size()),io_error);
+            std::fprintf(stderr,"stage streamed prefill: %s\n",err.c_str());return 1;
+        }
         if (ok && h.op == st::Verify) {
             ok = !streaming && h.rows > 0 && h.rows <= 16 && data.size() == h.rows * sizeof(int32_t) &&
                  h.position == model.position() && h.window == last_window + 1 && !model.stage_window_pending();
@@ -125,6 +158,33 @@ int main(int argc, char** argv) {
         } else if (ok && h.op == st::Restore) {
             ok = !streaming && data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
                  h.position == saved_position && h.position == model.snapshot_pos() && model.snapshot_restore();
+        } else if (ok && (h.op == st::CheckSave || h.op == st::CheckSaveSnapshot || h.op == st::CheckRestore)) {
+            ok = !streaming && !model.stage_window_pending() && !active_window && data.empty() && !h.rows &&
+                 h.window >= 1 && h.window <= 256;
+            if (ok) {
+                const int slot = (int)h.window - 1;
+                if (h.op == st::CheckSave) ok = h.position == model.position() && model.ckpt_save(slot, err);
+                else if (h.op == st::CheckSaveSnapshot) ok = h.position == model.snapshot_pos() && model.ckpt_save_snapshot(slot, err);
+                else ok = model.ckpt_restore(slot, err) && model.position() == h.position;
+            }
+        } else if (ok && h.op == st::SlotRead) {
+            ok = !streaming && !model.stage_window_pending() && !active_window && data.empty() && !h.rows && !h.window &&
+                 h.position == model.snapshot_pos() && model.slot_save(slot_bytes, err) > 0;
+        } else if (ok && h.op == st::SlotWrite) {
+            ok = !streaming && !model.stage_window_pending() && !active_window && !data.empty() && !h.rows && !h.window &&
+                 model.slot_load(data, h.position, err);
+            if (ok) saved_position = h.position;
+        } else if (ok && h.op == st::Prefill) {
+            ok = !streaming && !model.stage_window_pending() && !active_window &&
+                 h.position == model.position() && h.rows > 0 && h.rows <= st::max_prefill_rows &&
+                 h.window == last_window + 1 && data.size() == ((size_t) h.rows + 1)*sizeof(int32_t);
+            if (ok) {
+                std::vector<int32_t> tokens(h.rows + 1);
+                std::memcpy(tokens.data(), data.data(), data.size());
+                const int32_t next = tokens.back(); tokens.pop_back();
+                ok = model.stage_prefill(tokens, next, nullptr, 0, result.residual, err);
+                if (ok) last_window = h.window;
+            }
         } else if (ok && h.op == st::StreamStep) {
             ok = h.rows == 1 && data.size() == 2 * sizeof(int32_t) && h.window == last_window + 1 &&
                  active_window == 0 && (streaming || !model.stage_window_pending());
@@ -168,8 +228,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "stage worker: %s\n", err.c_str()); return 1;
         }
         response.position = model.position();
-        const void* payload = result.residual.empty() ? nullptr : result.residual.data();
-        if (!st::send_packet(fd, response, payload, result.residual.size() * sizeof(float), err)) {
+        const void* payload = !slot_bytes.empty() ? (const void*)slot_bytes.data() :
+                              result.residual.empty() ? nullptr : (const void*)result.residual.data();
+        const size_t payload_size = !slot_bytes.empty() ? slot_bytes.size() : result.residual.size()*sizeof(float);
+        if (!st::send_packet(fd, response, payload, payload_size, err)) {
             std::fprintf(stderr, "%s\n", err.c_str()); return 1;
         }
         // The actual token's response is already on the wire. Compute the next guess while the coordinator

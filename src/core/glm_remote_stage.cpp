@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <thread>
 
@@ -38,11 +39,13 @@ bool same_info(const Info& a, const Info& b) {
            a.top_k == b.top_k && a.nextn == b.nextn && a.kv_bits == b.kv_bits && a.kv_resident == b.kv_resident;
 }
 bool valid_header(const Header& h, std::string& err) {
-    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > StreamEnd ||
-        (h.flags & ~(reply | failure | cache_hit)) ||
-        ((h.flags & (failure | cache_hit)) && !(h.flags & reply)) ||
+    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > PrefillStream ||
+        (h.flags & ~(reply | failure | cache_hit | more)) ||
+        ((h.flags & (failure | cache_hit | more)) && !(h.flags & reply)) ||
         ((h.flags & cache_hit) && (h.op != StreamStep || (h.flags & failure))) ||
-        h.bytes > max_payload || h.rows > 16 || h.position < 0) {
+        ((h.flags & more) && (h.op != PrefillStream || (h.flags & failure))) ||
+        h.bytes > ((h.op == Prefill || h.op == PrefillStream || h.op == SlotRead || h.op == SlotWrite) ? max_payload : 16u * 4u * 4096u * sizeof(float)) ||
+        h.rows > ((h.op == Prefill || h.op == PrefillStream) ? max_prefill_rows : 16u) || h.position < 0) {
         err = "stage protocol: invalid magic/version/op/flags/shape"; return false;
     }
     return true;
@@ -204,6 +207,76 @@ bool GlmRemoteStage::verify(int64_t p0, const int32_t* tokens, int rows, std::ve
     pending_rows_ = rows; pending_position_ = p0;
     return true;
 }
+bool GlmRemoteStage::prefill(int64_t position, const std::vector<int32_t>& tokens, int32_t next_token,
+                              std::vector<float>& residual, std::string& err) {
+    if (pending() || streaming_ || position != position_ || tokens.empty() ||
+        tokens.size() > st::max_prefill_rows || position > info_.context - (int64_t) tokens.size() ||
+        next_token < -1 || (next_token >= 0 && (uint32_t) next_token >= info_.vocab)) {
+        err = "invalid remote prefill range/lifecycle"; return false;
+    }
+    for (int32_t t : tokens) if (t < 0 || (uint32_t) t >= info_.vocab) {
+        err = "invalid remote prefill token"; return false;
+    }
+    std::vector<int32_t> payload(tokens); payload.push_back(next_token);
+    st::Header h; h.op = st::Prefill; h.position = position; h.rows = tokens.size(); h.window = ++window_;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, payload.data(), payload.size()*sizeof(int32_t), a, data, err)) return false;
+    const size_t floats = tokens.size() * info_.hc * info_.embd;
+    if (a.position != position + (int64_t) tokens.size() || a.rows != tokens.size() ||
+        data.size() != floats * sizeof(float)) {
+        err = "remote prefill residual shape/position mismatch"; close(); return false;
+    }
+    residual.resize(floats); std::memcpy(residual.data(), data.data(), data.size());
+    if (const char* prefix = std::getenv("STRATA_GLM_STAGE_DIAG"); prefix && *prefix && position == 0) {
+        std::ofstream f(std::string(prefix) + "-prefill-" + std::to_string(tokens.size()) + ".f32", std::ios::binary);
+        f.write(reinterpret_cast<const char*>(residual.data()), residual.size()*sizeof(float));
+    }
+    position_ = a.position;
+    return true;
+}
+bool GlmRemoteStage::prefill_stream(int64_t position, const std::vector<int32_t>& tokens, int32_t next_token, int chunk,
+    const std::function<bool(size_t,const std::vector<float>&,std::string&)>& consume, std::string& err) {
+    if (!ready() || pending() || streaming_ || position!=position_ || tokens.empty() ||
+        tokens.size()>st::max_prefill_rows || position>info_.context-(int64_t)tokens.size() ||
+        chunk<1 || chunk>(int)st::max_prefill_rows || next_token < -1 ||
+        (next_token>=0 && (uint32_t)next_token>=info_.vocab)) {err="invalid streamed prefill request";return false;}
+    for(int t:tokens)if(t<0 || (uint32_t)t>=info_.vocab){err="invalid streamed prefill token";return false;}
+    std::vector<int32_t> ids;ids.reserve(tokens.size()+2);ids.push_back(chunk);
+    ids.insert(ids.end(),tokens.begin(),tokens.end());ids.push_back(next_token);
+    st::Header h;h.op=st::PrefillStream;h.position=position;h.rows=tokens.size();
+    h.session=session_;h.sequence=++sequence_;h.window=++window_;
+    if(!st::send_packet(fd_,h,ids.data(),ids.size()*sizeof(int32_t),err)){close();return false;}
+    struct Packet {st::Header h;std::vector<uint8_t> data;std::string error;bool ok=false;};
+    const auto read=[this](){Packet p;p.ok=st::receive_packet(fd_,p.h,p.data,p.error);return p;};
+    auto pending=std::async(std::launch::async,read);
+    bool consumed=true;std::string consume_error;
+    for(size_t at=0;at<tokens.size();) {
+        const size_t count=std::min<size_t>(chunk,tokens.size()-at);
+        Packet p=pending.get();const auto& a=p.h;
+        if(!p.ok){err=p.error;close();return false;}
+        if(a.session!=h.session || a.sequence!=h.sequence || a.window!=h.window || a.op!=h.op || !(a.flags&st::reply)) {
+            err="streamed prefill response identity mismatch";close();return false;
+        }
+        if(a.flags&st::failure){err="stage worker: "+std::string(p.data.begin(),p.data.end());close();return false;}
+        const bool another=at+count<tokens.size();
+        if(a.rows!=count || a.position!=position+(int64_t)(at+count) || bool(a.flags&st::more)!=another ||
+           p.data.size()!=count*(size_t)info_.hc*info_.embd*sizeof(float)) {
+            err="streamed prefill response shape/order mismatch";close();return false;
+        }
+        // One reader overlaps the next FP32 transfer with this chunk's local GPU work. Cancellation
+        // drains the bounded outstanding prompt before reset, keeping the connection reusable.
+        if(another)pending=std::async(std::launch::async,read);
+        if(consumed) {
+            std::vector<float> residual(p.data.size()/sizeof(float));
+            std::memcpy(residual.data(),p.data.data(),p.data.size());
+            p.data.clear();p.data.shrink_to_fit();
+            consumed=consume(at,residual,consume_error);
+        }
+        at+=count;position_=position+at;
+    }
+    if(!consumed){err=consume_error.empty()?"streamed prefill consumer failed":consume_error;return false;}
+    return true;
+}
 bool GlmRemoteStage::control(uint32_t op, int64_t position, uint32_t rows, std::string& err) {
     st::Header h; h.op = op; h.position = position; h.rows = rows;
     h.window = op == st::Commit ? window_ : 0;
@@ -233,6 +306,48 @@ bool GlmRemoteStage::restore(int64_t position, std::string& err) {
     if (pending() || streaming_ || position < 0 || position != snapshot_position_) { err = "stage snapshot unavailable"; return false; }
     if (!control(st::Restore, position, 0, err)) return false;
     position_ = position; return true;
+}
+bool GlmRemoteStage::checkpoint(uint32_t op, int slot, int64_t position, std::string& err) {
+    if (pending() || streaming_ || slot < 0 || slot >= 256 || position < 0 || position > info_.context ||
+        (op != st::CheckSave && op != st::CheckSaveSnapshot && op != st::CheckRestore) ||
+        (op == st::CheckSave && position != position_) ||
+        (op == st::CheckSaveSnapshot && position != snapshot_position_)) {
+        err = "invalid remote checkpoint lifecycle/identity"; return false;
+    }
+    st::Header h; h.op = op; h.window = slot + 1; h.position = position;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, nullptr, 0, a, data, err)) return false;
+    const int64_t expected = op == st::CheckRestore ? position : position_;
+    if (a.position != expected || a.rows || !data.empty()) {
+        err = "remote checkpoint acknowledgment mismatch"; close(); return false;
+    }
+    if (op == st::CheckRestore) position_ = position;
+    return true;
+}
+bool GlmRemoteStage::slot_read(int64_t position, std::vector<uint8_t>& bytes, std::string& err) {
+    if (pending() || streaming_ || position < 1 || position != snapshot_position_) {
+        err = "invalid remote slot snapshot"; return false;
+    }
+    st::Header h; h.op = st::SlotRead; h.position = position;
+    st::Header a;
+    if (!exchange(h, nullptr, 0, a, bytes, err)) return false;
+    if (a.position != position_ || a.rows || bytes.empty()) {
+        err = "remote slot export acknowledgment mismatch"; close(); return false;
+    }
+    return true;
+}
+bool GlmRemoteStage::slot_write(int64_t position, const std::vector<uint8_t>& bytes, std::string& err) {
+    if (pending() || streaming_ || position < 1 || position > info_.context || bytes.empty() || bytes.size() > st::max_payload) {
+        err = "invalid remote slot import"; return false;
+    }
+    st::Header h; h.op = st::SlotWrite; h.position = position;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, bytes.data(), bytes.size(), a, data, err)) return false;
+    if (a.position != position || a.rows || !data.empty()) {
+        err = "remote slot import acknowledgment mismatch"; close(); return false;
+    }
+    position_ = snapshot_position_ = position;
+    return true;
 }
 bool GlmRemoteStage::stream_step(int64_t position, int32_t token, int32_t next_guess,
                                  std::vector<float>& residual, bool& hit, std::string& err) {

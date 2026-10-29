@@ -1184,8 +1184,10 @@ bool Glm5Model::fast_setup(std::string& err) {
         // The experimental stage transport currently prefills through bounded verification windows. Reserving
         // the unused 32K-token prefill staging/loan here can consume several GiB of the front host's RAM and
         // needlessly shrink its permanent expert pool. Large-chunk remote prefill must opt into its own budget.
-        if (!stage_windows_enabled_ && !prefill_setup(err)) return false;
-        if (stage_windows_enabled_)
+        const char* stage_pf = getenv("STRATA_GLM_STAGE_PREFILL");
+        const bool batch_stage = stage_pf && std::strcmp(stage_pf, "1") == 0;
+        if ((!stage_windows_enabled_ || batch_stage) && !prefill_setup(err)) return false;
+        if (stage_windows_enabled_ && !batch_stage)
             std::fprintf(stderr, "glm stage: bounded-window prefill; legacy chunk staging is not reserved\n");
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
@@ -8595,7 +8597,7 @@ void Glm5Model::ckpt_pool_copy(int64_t pos, float* host, bool restore) {
 }
 
 bool Glm5Model::ckpt_save_snapshot(int slot, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
+    if (remote_front_ && !remote_front_->checkpoint(stageproto::CheckSaveSnapshot, slot, snap_pos_, err)) return false;
     ckpt_join();
     if (slot < 0) {
         err = "checkpoint: no slot";
@@ -8665,7 +8667,7 @@ bool Glm5Model::ckpt_save_snapshot(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_save(int slot, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
+    if (remote_front_ && !remote_front_->checkpoint(stageproto::CheckSave, slot, pos_, err)) return false;
     ckpt_join();
     if (slot < 0) {
         err = "checkpoint: no slot";
@@ -8715,8 +8717,11 @@ bool Glm5Model::ckpt_save(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_restore(int slot, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
     ckpt_join();
+    if (remote_front_) {
+        if (slot < 0 || slot >= (int)ckpt_pos_.size() || ckpt_pos_[slot] < 0) { err="remote checkpoint unavailable"; return false; }
+        if (!remote_front_->checkpoint(stageproto::CheckRestore, slot, ckpt_pos_[slot], err)) { stage_failed_=true;return false; }
+    }
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
         if (m->fast_ == nullptr || slot < 0 || (int) m->ckpt_pos_.size() <= slot || m->ckpt_pos_[(size_t) slot] < 0 ||
             m->ckpt_pos_[(size_t) slot] != ckpt_pos_[(size_t) slot]) {
@@ -8787,7 +8792,15 @@ std::vector<std::pair<float*, int64_t>> slot_dsa_runs(const Glm5Geometry& g, boo
 }  // namespace
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support persisted conversation slots"; return 0; }
+    if (remote_front_) {
+        std::vector<uint8_t> data;
+        if (!slot_save(data, err)) return 0;
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f.write((const char*)data.data(), data.size());
+        f.flush();
+        if (!f) { err="cannot write paired remote slot";return 0; }
+        return data.size();
+    }
     std::vector<Glm5Model*> halves;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr || m->snap_pos_ < 0 || m->snap_pos_ != snap_pos_) {
@@ -8864,7 +8877,14 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
 }
 
 bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support persisted conversation slots"; return false; }
+    if (remote_front_) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        const auto size=f.tellg();
+        if (!f || size < 32 || (uint64_t)size > (uint64_t(8)<<30)) { err="invalid paired slot file";return false; }
+        std::vector<uint8_t> data((size_t)size); f.seekg(0);
+        if (!f.read((char*)data.data(), data.size())) { err="truncated paired slot file";return false; }
+        return slot_load(data, n_pos, err);
+    }
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
     dflash_reset();   // another conversation's state: the drafter's cached positions are not its
     std::ifstream f(path, std::ios::binary);
@@ -8965,8 +8985,39 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
 // caller-held vector<uint8_t> and the state directly - no file, no bounce buffer.  slot_save sizes the
 // buffer exactly first (slot_dsa_runs is read-only, so the layout can be taken before any byte moves),
 // and any allocation failure is caught (the caller falls back to the disk path).
+// A parked remote conversation is one self-contained file/blob: local tail plus front state.
+// No worker-local pathname survives a restart; import restores both snapshots before reuse.
 uint64_t Glm5Model::slot_save(std::vector<uint8_t>& data, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support conversation slots"; return 0; }
+    if (!remote_front_) return slot_save_local(data, err);
+    if (stage_window_pending_ || stage_failed_ || remote_front_->streaming()) { err="remote slot needs idle stages";return 0; }
+    std::vector<uint8_t> local, front;
+    if (!slot_save_local(local, err) || !remote_front_->slot_read(snap_pos_, front, err)) return 0;
+    const uint64_t header[4]={0x31544f4c5352474dull,(uint64_t)snap_pos_,local.size(),front.size()};
+    data.resize(sizeof(header)+local.size()+front.size());
+    std::memcpy(data.data(),header,sizeof(header));
+    std::memcpy(data.data()+sizeof(header),local.data(),local.size());
+    std::memcpy(data.data()+sizeof(header)+local.size(),front.data(),front.size());
+    return data.size();
+}
+bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err) {
+    if (!remote_front_) return slot_load_local(data,n_pos,err);
+    uint64_t h[4]={};
+    if (data.size()>=sizeof(h)) std::memcpy(h,data.data(),sizeof(h));
+    if (stage_window_pending_ || stage_failed_ || remote_front_->streaming() || n_pos<1 || n_pos>max_ctx_ ||
+        h[0]!=0x31544f4c5352474dull || h[1]!=(uint64_t)n_pos || !h[2] || !h[3] ||
+        h[2]>data.size()-std::min(data.size(),sizeof(h)) ||
+        h[3]!=data.size()-sizeof(h)-h[2] || h[3]>stageproto::max_payload) {
+        err="invalid paired remote conversation slot";return false;
+    }
+    const auto begin=data.begin()+sizeof(h);
+    std::vector<uint8_t> local(begin,begin+h[2]),front(begin+h[2],data.end());
+    if (!remote_front_->slot_write(n_pos,front,err) || !slot_load_local(local,n_pos,err)) {
+        stage_failed_=true;return false;
+    }
+    return true;
+}
+
+uint64_t Glm5Model::slot_save_local(std::vector<uint8_t>& data, std::string& err) {
     std::vector<Glm5Model*> halves;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr || m->snap_pos_ < 0 || m->snap_pos_ != snap_pos_) {
@@ -9060,8 +9111,7 @@ uint64_t Glm5Model::slot_save(std::vector<uint8_t>& data, std::string& err) {
     return total;
 }
 
-bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err) {
-    if (remote_front_) { err = "remote stages do not yet support conversation slots"; return false; }
+bool Glm5Model::slot_load_local(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err) {
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
     dflash_reset();   // another conversation's state: the drafter's cached positions are not its
     size_t pos = 0;

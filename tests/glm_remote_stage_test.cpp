@@ -32,6 +32,7 @@ void peer(int fd, int mode) {
     const uint64_t session = h.session;
     uint64_t seq = 0;
     int32_t guessed = -1;
+    int64_t position = 0;
     while (st::receive_packet(fd, h, data, err)) {
         if (h.session != session || h.sequence != ++seq) std::abort();
         h.flags = st::reply;
@@ -45,6 +46,37 @@ void peer(int fd, int mode) {
             if (mode == 8) --h.position;
             if (mode == 9) h.flags ^= st::cache_hit;
             if (mode == 10) residual.pop_back();
+            if (!st::send_packet(fd, h, residual.data(), residual.size()*sizeof(float), err)) break;
+        } else if (h.op == st::SlotRead) {
+            h.position=position;
+            const uint8_t blob[4]={1,2,3,4};
+            if (!st::send_packet(fd,h,blob,sizeof(blob),err)) break;
+        } else if (h.op == st::SlotWrite) {
+            if (data.size()!=4 || data.front()!=1 || data.back()!=4) std::abort();
+            if (!st::send_packet(fd,h,nullptr,0,err)) break;
+        } else if (h.op == st::CheckSave || h.op == st::CheckSaveSnapshot || h.op == st::CheckRestore) {
+            if (!data.empty()) std::abort();
+            if(h.op!=st::CheckRestore)h.position=position;
+            if (!st::send_packet(fd,h,nullptr,0,err)) break;
+        } else if (h.op == st::PrefillStream) {
+            if(data.size()!=((size_t)h.rows+2)*sizeof(int32_t))std::abort();
+            int32_t chunk=0;std::memcpy(&chunk,data.data(),sizeof(chunk));
+            const int64_t start=h.position;const uint32_t total=h.rows;bool sent=true;
+            for(uint32_t at=0;at<total;) {
+                st::Header a=h;a.rows=std::min<uint32_t>(chunk,total-at);a.position=start+at+a.rows;
+                a.flags=st::reply|(at+a.rows<total?st::more:0);
+                std::vector<float> residual((size_t)a.rows*i.hc*i.embd,.875f);
+                if(mode==11)--a.position;
+                if(mode==12)residual.pop_back();
+                if(!st::send_packet(fd,a,residual.data(),residual.size()*sizeof(float),err)){sent=false;break;}
+                at+=a.rows;
+            }
+            if(!sent)break;
+            h.position=start+total;
+        } else if (h.op == st::Prefill) {
+            if (data.size() != ((size_t)h.rows + 1)*sizeof(int32_t)) std::abort();
+            std::vector<float> residual((size_t)h.rows*i.hc*i.embd, .75f);
+            h.position += h.rows;
             if (!st::send_packet(fd, h, residual.data(), residual.size()*sizeof(float), err)) break;
         } else if (h.op == st::Verify) {
             if (data.size() != h.rows * sizeof(int32_t)) std::abort();
@@ -70,6 +102,7 @@ void peer(int fd, int mode) {
             if (h.op == st::Commit) h.position += h.rows;
             if (!st::send_packet(fd, h, nullptr, 0, err)) break;
         }
+        position=h.position;
     }
     ::close(fd);
 }
@@ -77,7 +110,7 @@ void peer(int fd, int mode) {
 int main() {
     std::string err;
     st::Header h;
-    for (uint32_t op = st::Hello; op <= st::StreamEnd; ++op) {
+    for (uint32_t op = st::Hello; op <= st::PrefillStream; ++op) {
         h.op = op;
         require(st::valid_header(h, err), "valid opcode");
     }
@@ -134,6 +167,34 @@ int main() {
                 require(client.verify(2, ids, 1, residual, err) && client.commit(1, err), "T1 after restore");
                 require(client.reset(err), "reset clears snapshot and state");
                 require(!client.restore(2, err), "old snapshot unavailable after reset");
+                std::vector<int32_t> prompt(33, 1);
+                require(!client.prefill(1, prompt, -1, residual, err), "prefill rejects wrong position");
+                require(!client.prefill(0, prompt, -2, residual, err), "prefill rejects invalid next token");
+                require(client.prefill(0, prompt, 2, residual, err), "large prefill RPC");
+                require(residual.size() == 33*4*4096 && residual.front() == .75f && residual.back() == .75f,
+                        "prefill FP32 payload");
+                require(client.verify(33, ids, 1, residual, err) && client.commit(1, err), "decode follows prefill position");
+                require(client.save(34,err),"snapshot after prefill and decode");
+                require(client.checkpoint(st::CheckSave,0,34,err),"paired live checkpoint");
+                require(client.checkpoint(st::CheckSaveSnapshot,1,34,err),"paired snapshot checkpoint");
+                std::vector<uint8_t> blob;
+                require(client.slot_read(34,blob,err) && blob.size()==4,"export front slot bytes");
+                require(client.reset(err), "reset after prefill");
+                require(client.slot_write(34,blob,err) && client.restore(34,err),"import front slot establishes snapshot");
+                require(client.verify(34,ids,1,residual,err) && client.commit(1,err),"decode after slot import");
+                require(client.checkpoint(st::CheckRestore,0,34,err),"restore paired checkpoint position");
+                require(client.verify(34,ids,1,residual,err) && client.commit(1,err),"decode after checkpoint restore");
+                require(client.reset(err),"reset after parking checks");
+                size_t consumed=0;
+                require(client.prefill_stream(0,prompt,2,16,[&](size_t at,const std::vector<float>& r,std::string&){
+                    require(at==consumed && r.front()==.875f && r.back()==.875f,"ordered exact FP32 streamed chunk");
+                    consumed+=r.size()/(4*4096);return true;
+                },err) && consumed==33,"multi-frame prefill consumed completely");
+                require(client.verify(33,ids,1,residual,err) && client.commit(1,err),"decode after streamed prefill");
+                require(client.reset(err),"reset before streaming cancellation");
+                require(!client.prefill_stream(0,prompt,2,16,[](size_t,const std::vector<float>&,std::string& e){e="cancelled";return false;},err)
+                    && err=="cancelled" && client.ready(),"cancelled consumer drains front without losing connection");
+                require(client.reset(err),"reset after streamed cancellation");
                 require(client.verify(0, ids, 3, residual, err) && client.commit(3, err), "full acceptance after reset");
                 bool hit = true;
                 require(!client.stream_step(3, -1, 2, residual, hit, err), "stream rejects invalid actual token");
@@ -159,6 +220,14 @@ int main() {
         std::vector<float> residual; bool hit = false;
         require(!client.stream_step(0, 1, 2, residual, hit, err) && !client.ready(), "corrupt stream result closes session");
         client.close(); server.join();
+    }
+    for(int mode:{11,12}) {
+        int sockets[2];require(::socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"streamed fault socketpair");
+        std::thread server(peer,sockets[1],mode);GlmRemoteStage client;
+        require(client.open_connected(sockets[0],info(),err),"streamed fault hello");
+        require(!client.prefill_stream(0,std::vector<int32_t>(33,1),2,16,
+            [](size_t,const std::vector<float>&,std::string&){return true;},err) && !client.ready(),"bad streamed frame poisons connection");
+        client.close();server.join();
     }
     std::printf("glm_remote_stage_test: PASS (%d checks, actual CPU socket transport)\n", checks);
 }

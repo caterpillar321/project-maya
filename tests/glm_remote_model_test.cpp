@@ -40,12 +40,31 @@ int main(int argc, char** argv) {
     char* end = nullptr;
     const long long context = argc == 4 ? std::strtoll(argv[3], &end, 10) : 4096;
     if (context < 64 || context > 262144 || (end && *end)) return 2;
-    require(std::getenv("STRATA_GLM_REMOTE_FRONT") != nullptr, "explicit remote front required");
+    const bool local_diag = std::getenv("MAYA_LOCAL_PREFILL_DIAG") != nullptr;
+    require(local_diag || std::getenv("STRATA_GLM_REMOTE_FRONT") != nullptr, "explicit remote front required");
     strata::core::Glm5Model model;
     model.set_expert_profile(argv[2]);
     std::string err;
+    if (std::getenv("MAYA_FRONT_PREFILL_REFERENCE")) {
+        require(model.enable_stage_windows(err),err);
+        require(model.load_pack(argv[1],context,err,0,0,16),err);
+        for (int i=0;i<40;++i) {
+            int32_t tok=1000+(i*137)%7000;strata::core::Glm5Model::StageWindowResult r;
+            require(model.stage_window(&tok,1,nullptr,0,r,err) && model.stage_commit(1,err),err);
+        }
+        for (int n : {1,2,16,33}) {
+            model.reset();std::vector<int32_t> ids;
+            for(int i=0;i<n;++i)ids.push_back(1000+(i*137)%7000);
+            require(model.prefill(ids,err,1000+(n*137)%7000),err);
+            int32_t tok=1000+(n*137)%7000;strata::core::Glm5Model::StageWindowResult r;
+            require(model.stage_window(&tok,1,nullptr,0,r,err) && model.stage_commit(1,err),err);
+        }
+        std::puts("LEGACY FRONT PREFILL REFERENCE EXPORTED");return 0;
+    }
+    const char* pf_reference = std::getenv("MAYA_STAGE_PREFILL_REFERENCE");
+    if (local_diag && pf_reference) require(model.enable_stage_windows(err), err);
     require(model.load_pack_env(argv[1], context, err), err);
-    require(model.remote_front_enabled() && model.mtp_ready(), "remote native MTP must be active");
+    require((local_diag || model.remote_front_enabled()) && model.mtp_ready(), "remote native MTP must be active");
     const size_t V = model.geometry().n_vocab;
     const bool refresh = std::getenv("STRATA_GLM_STAGE_HELPER_REFRESH") != nullptr;
     // Forced valid token IDs isolate state/geometry from tokenizer and sampling changes. The speed harness is separate.
@@ -65,6 +84,41 @@ int main(int argc, char** argv) {
         require(model.forward({t}, logits, err), err);
         reference.push_back(std::move(logits));
     }
+    if (std::getenv("MAYA_STAGE_PREFILL_DIAG")) {
+        for (int n : {1, 2, 16, 33}) {
+            model.reset();
+            std::vector<float> got;
+            const std::vector<int32_t> prompt(tokens.begin(), tokens.begin()+n);
+            if (local_diag && pf_reference) {
+                std::vector<float> unused;
+                require(model.stage_prefill(prompt, tokens[n], nullptr, 0, unused, err), err);
+            } else require(model.prefill(prompt, err, tokens[n]), err);
+            require(model.forward({}, got, err), err);
+            if (pf_reference) {
+                const std::string path = std::string(pf_reference)+"-"+std::to_string(n)+".f32";
+                if (local_diag) {
+                    FILE* f=std::fopen(path.c_str(),"wb"); require(f!=nullptr,"open native prefill reference");
+                    require(std::fwrite(got.data(),sizeof(float),V,f)==V,"write native prefill reference");std::fclose(f);
+                } else {
+                    std::vector<float> ref(V); FILE* f=std::fopen(path.c_str(),"rb"); require(f!=nullptr,"read native prefill reference");
+                    require(std::fread(ref.data(),sizeof(float),V,f)==V,"complete native prefill reference");std::fclose(f);
+                    double num=0,den=0,worst=0;for(size_t j=0;j<V;++j){double d=got[j]-ref[j];num+=d*d;den+=(double)ref[j]*ref[j];worst=std::max(worst,std::abs(d));}
+                    std::printf("PREFILL NATIVE PARITY n=%d worst=%g relative=%g pick=%d/%d\n",n,worst,std::sqrt(num/den),pick(got.data(),V),pick(ref.data(),V));
+                }
+            }
+            double direct_num=0,direct_den=0,direct_worst=0;
+            for (size_t j=0;j<V;++j) { double d=got[j]-reference[n-1][j]; direct_worst=std::max(direct_worst,std::abs(d));direct_num+=d*d;direct_den+=(double)reference[n-1][j]*reference[n-1][j]; }
+            std::printf("PREFILL DIAG directlogits n=%d worst=%g relative=%g\n",n,direct_worst,std::sqrt(direct_num/direct_den));
+            strata::kernels::SamplerParams greedy{}; greedy.greedy=true;
+            std::printf("PREFILL DIAG direct n=%d pick=%d/%d\n", n, model.sample_token(greedy,err), pick(reference[n-1].data(),V));
+            require(model.forward({tokens[n]}, got, err), err);
+            double worst=0, num=0, den=0;
+            for (size_t j=0; j<V; ++j) { double d=got[j]-reference[n][j]; worst=std::max(worst,std::abs(d));num+=d*d;den+=(double)reference[n][j]*reference[n][j]; }
+            std::printf("PREFILL DIAG n=%d worst=%g relative=%g pick=%d/%d\n",n,worst,std::sqrt(num/den),pick(got.data(),V),pick(reference[n].data(),V));
+            std::fflush(stdout);
+        }
+    }
+    if (local_diag) { std::puts("LOCAL PREFILL DIAGNOSTIC COMPLETE (not a correctness gate)"); return 0; }
     model.reset();
     std::vector<float> reset_logits;
     require(model.forward({tokens[0]}, reset_logits, err), err);
@@ -91,14 +145,79 @@ int main(int argc, char** argv) {
     }
     model.reset();
     const std::vector<int32_t> prefix(tokens.begin(), tokens.begin()+33);
-    require(model.prefill(prefix, err), err);
-    require(model.snapshot_save(), "paired snapshot save");
+    // Keep the original token-window checks exact. Batched GEMM has its own same-GPU legacy reference;
+    // comparing it to Q8 token GEMV would conflate pre-existing arithmetic differences with transport bugs.
+    const bool batch_pf = std::getenv("STRATA_GLM_STAGE_PREFILL") && std::string(std::getenv("STRATA_GLM_STAGE_PREFILL"))=="1";
     std::vector<float> logits;
+    if (batch_pf) require(model.forward(prefix, logits, err), err);
+    else require(model.prefill(prefix, err), err);
+    require(model.snapshot_save(), "paired snapshot save");
     require(model.forward({tokens[33]}, logits, err), err);
     compare(reference[33].data(), logits.data(), V, "bounded prefill");
     require(model.snapshot_restore(), "paired snapshot restore");
     require(model.forward({tokens[33]}, logits, err), err);
     compare(reference[33].data(), logits.data(), V, "paired prefix restore");
+
+    // Both hosts' checkpoints and self-contained parked slots preserve the original exact token path.
+    model.reset();require(model.forward(prefix,logits,err),err);
+    require(model.snapshot_save(),"snapshot before paired parking");
+    require(model.ckpt_save_snapshot(0,err),err);
+    require(model.forward({tokens[33]},logits,err),err);
+    require(model.ckpt_save(1,err),err);
+    require(model.forward({tokens[34]},logits,err),err);
+    require(model.ckpt_restore(1,err),err);
+    require(model.forward({tokens[34]},logits,err),err);
+    compare(reference[34].data(),logits.data(),V,"paired live checkpoint");
+    require(model.ckpt_restore(0,err),err);
+    require(model.forward({tokens[33]},logits,err),err);
+    compare(reference[33].data(),logits.data(),V,"paired snapshot checkpoint");
+    std::vector<uint8_t> parked;
+    require(model.slot_save(parked,err)>0,err);
+    model.reset();require(model.forward({tokens[8],tokens[9]},logits,err),err);
+    require(model.slot_load(parked,33,err),err);
+    require(model.forward({tokens[33]},logits,err),err);
+    compare(reference[33].data(),logits.data(),V,"paired parked conversation");
+
+    if (batch_pf) {
+        model.reset();require(model.prefill(prefix,err,tokens[33]),err);
+        std::vector<float> batch_head,batch_next;
+        require(model.forward({},batch_head,err),err);
+        require(model.snapshot_save(),"snapshot after batched prefill");
+        require(model.forward({tokens[33]},batch_next,err),err);
+        require(model.snapshot_restore(),"restore batched prefill snapshot");
+        require(model.forward({tokens[33]},logits,err),err);
+        compare(batch_next.data(),logits.data(),V,"batch prefill snapshot continuation");
+        std::vector<uint8_t> batch_slot;
+        require(model.slot_save(batch_slot,err)>0,err);
+        model.reset();require(model.slot_load(batch_slot,33,err),err);
+        require(model.forward({tokens[33]},logits,err),err);
+        compare(batch_next.data(),logits.data(),V,"batch prefill parked continuation");
+        // Sampling after a batch-prefilled prefix compares against exactly that snapshot, not a rerun
+        // whose expert residency could choose another pre-existing MMQ/light arithmetic path.
+        require(model.snapshot_restore(),"batch snapshot before sampled reference");
+        require(model.forward({tokens[33]},logits,err),err);
+        strata::kernels::SamplerParams sp{};sp.seed=2468;sp.temperature=.8f;
+        std::vector<int> plain_batch,mtp_batch;
+        for(int i=0;i<24;++i){int t=model.sample_token(sp,err);require(t>=0,err);++sp.counter;plain_batch.push_back(t);require(model.forward({t},logits,err),err);}
+        require(model.snapshot_restore(),"batch snapshot before sampled pipeline");
+        require(model.forward({tokens[33]},logits,err),err);sp.counter=0;int64_t n_out=0;
+        require(model.decode_mtp(sp,24,[&](int t){mtp_batch.push_back(t);return true;},n_out,err),err);
+        require(n_out==24 && plain_batch==mtp_batch,"sampled pipeline after batched prefill equals its plain continuation");
+        if(std::getenv("STRATA_GLM_PREFILL_PIPE")) {
+            std::vector<int32_t> longer(257);for(int i=0;i<257;++i)longer[i]=1000+(i*137)%7000;
+            model.reset();require(model.prefill(longer,err,4321),err);
+            require(model.position()==257 && model.snapshot_save(),"multi-chunk paired prefill position and snapshot");
+            require(model.forward({4321},batch_next,err),err);
+            require(model.snapshot_restore(),"restore multi-chunk prefix");
+            require(model.forward({4321},logits,err),err);
+            compare(batch_next.data(),logits.data(),V,"multi-chunk prefill continuation");
+            model.reset();model.prefill_progress=[](int64_t,int64_t){return false;};
+            require(!model.prefill(longer,err,4321) && err=="cancelled","cancel streamed prefill");
+            model.prefill_progress=nullptr;model.reset();
+            require(model.forward({tokens[0]},logits,err),err);
+            compare(reference[0].data(),logits.data(),V,"reset after streamed prefill cancellation");
+        }
+    }
 
     // Front speculation must preserve exact target logits for forced hits, forced misses and cancellation.
     // The first reference epoch may differ after explicit helper refresh, so regenerate for the current one.

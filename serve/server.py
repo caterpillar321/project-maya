@@ -1943,6 +1943,56 @@ class Service:
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
+    def splice_answer(self, ids, messages):
+        """STRATA_GLM_KEEP_ANSWER=1 (with the engine's switch of that name, 10-26): the engine keeps its state where the
+        last answer stopped, but a client sends that answer back as text, and its tokens read again can split
+        differently from the ones the model wrote - one different id and the whole answer is read again.  When this
+        prompt is the last one + text that decodes to exactly what the model wrote + its stop marker, the model's own
+        ids go in that place.  Every earlier swap is applied again first (a later turn sends the earlier answers as
+        text too, and the engine's state holds them as the model wrote them).  Anything else is left as rendered."""
+        last, self._answer = getattr(self, "_answer", None), None
+        swaps = getattr(self, "_swaps", None)
+        if swaps is None:
+            swaps = self._swaps = []          # [(re-read ids, the model's own ids)], oldest first
+        if os.environ.get("STRATA_GLM_KEEP_ANSWER", "0") in ("", "0") or images_of(messages):
+            return ids
+        at = 0
+        for mine, own in swaps:               # in order: each answer lies after the one before
+            n, first = len(mine), mine[0]
+            i = at
+            while True:
+                try:
+                    i = ids.index(first, i)
+                except ValueError:
+                    i = -1
+                    break
+                if ids[i:i + n] == mine:
+                    break
+                i += 1
+            if i >= 0:
+                ids = ids[:i] + own + ids[i + n:]
+                at = i + len(own)
+        if last is None:
+            return ids
+        prompt, out = last
+        L, stop = len(prompt), out[-1]
+        if len(ids) <= L or ids[:L] != prompt:
+            return ids
+        try:
+            u = ids.index(stop, L)
+        except ValueError:
+            return ids
+        mine = ids[L:u]
+        if mine == out[:-1] or not mine:
+            return ids
+        if self.tok.decode(mine) != self.tok.decode(out[:-1]):
+            return ids
+        swaps.append((mine, out[:-1]))
+        del swaps[:-64]
+        print(f"[maya] keep-answer: the last answer's {len(out) - 1} ids in place of {len(mine)} re-read ones "
+              f"({len(swaps)} swaps kept)", flush=True)
+        return ids[:L] + out[:-1] + ids[u:]
+
     def prepare(self, messages, tools, kwargs, max_new=None, cancel=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  A tool_choice that requires a call ("_force_tool": "" any, else the tool's name)
@@ -1964,6 +2014,7 @@ class Service:
                 prefill = CALL_START + (force if glm_calls else "\n" + (f"<function={force}>\n" if force else ""))
         given["_prefill"] = prefill
         ids = self.render_ids(messages, tools, kwargs, prefill)
+        ids = self.splice_answer(ids, messages)
         self.embeddings.path = None
         images = deepseek_images(messages) if getattr(self.template, "deepseek", False) else images_of(messages)
         if images and isinstance(self.vision, ds4_vision.Vision):
@@ -2429,6 +2480,9 @@ class Service:
                           f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
                     if os.environ.get("STRATA_DEBUG") and raw_ids:
                         print(f"[maya] raw: {self.tok.decode(raw_ids)!r}", flush=True)
+                    self._answer = (list(ids), list(raw_ids)) if (
+                        finish == "stop" and matched is None and not cancel.is_set() and raw_ids
+                        and raw_ids[-1] in self.stop_ids) else None
                 if hold[1]:
                     hold[1] = False
                     self.active -= 1
@@ -3718,7 +3772,7 @@ class Server(ThreadingHTTPServer):
             super().handle_error(request, client_address)
 
 
-SERVER_ENV = ("STRATA_ENGINE_STALL_S", "STRATA_HTTP_BACKLOG", "STRATA_MAX_BODY_MIB", "STRATA_FAIR_SLICE_S") + RESPONSE_ENV_KEYS
+SERVER_ENV = ("STRATA_GLM_KEEP_ANSWER", "STRATA_ENGINE_STALL_S", "STRATA_HTTP_BACKLOG", "STRATA_MAX_BODY_MIB", "STRATA_FAIR_SLICE_S") + RESPONSE_ENV_KEYS
 
 
 def apply_server_env(cfg: dict) -> None:
@@ -3727,6 +3781,8 @@ def apply_server_env(cfg: dict) -> None:
     global ENGINE_STALL_S
     for k in SERVER_ENV:
         v = (cfg.get("env") or {}).get(k)
+        if v is None and k.startswith("STRATA_"):   # (a config written with the MAYA_ names users see)
+            v = (cfg.get("env") or {}).get("MAYA_" + k[len("STRATA_"):])
         if v is not None:
             os.environ[k] = str(v)
     ENGINE_STALL_S = _stall_seconds()

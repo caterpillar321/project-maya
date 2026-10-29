@@ -116,7 +116,7 @@ bool GlmExpertHelper::open(int device, int n_embd, int n_ff,
     return check(cudaMemset(plan_.cpu_flag, 0, 64), "helper flags", err, device);
 }
 
-bool GlmExpertHelper::reserve(int keys, size_t requested_bytes, std::string& err) {
+bool GlmExpertHelper::reserve(int keys, size_t requested_bytes, std::string& err, size_t headroom) {
     DeviceScope scope(device_);
     if (!scope.ok) { err = scope.error(device_); return false; }
     slots_.assign((size_t) keys, {});
@@ -125,7 +125,6 @@ bool GlmExpertHelper::reserve(int keys, size_t requested_bytes, std::string& err
     if (!integrated_) {
         size_t free = 0, total = 0;
         if (!check(cudaMemGetInfo(&free, &total), "helper capacity", err, device_)) return false;
-        constexpr size_t headroom = 512ull << 20;   // PR #578's automatic VRAM budget
         capacity_ = std::min(capacity_, free > headroom ? free - headroom : 0);
         capacity_ &= ~(size_t) 255;
         if (capacity_ && !check(cudaMalloc((void**) &pool_, capacity_), "helper cache", err, device_)) return false;
