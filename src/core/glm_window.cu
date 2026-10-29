@@ -1211,6 +1211,64 @@ bool Glm5Model::remote_token(int32_t token, std::string& err) {
     return true;
 }
 
+bool Glm5Model::remote_stream_apply(int32_t token, int32_t next_guess, bool& hit, std::string& err) {
+    if (!remote_front_ || stage_window_pending_ || stage_failed_) {
+        err = "remote stream requires an idle coordinator"; return false;
+    }
+    const int64_t p0 = pos_;
+    std::vector<float> residual;
+    if (!remote_front_->stream_step(p0, token, next_guess, residual, hit, err)) { stage_failed_ = true; return false; }
+    StageWindowResult result;
+    if (!stage_window(&token, 1, residual.data(), residual.size(), result, err) ||
+        result.picks.size() != 1 || !window_commit(1, err)) {
+        stage_failed_ = true; return false;
+    }
+    FastState* F = fast_;
+    auto& W = F->win;
+    if (!glmfast::cuda_ok(cudaMemcpyAsync(sc_ + sc_logits, W.logits, (size_t) g_.n_vocab * sizeof(float),
+                                         cudaMemcpyDeviceToDevice, F->cs), "stream last logits", err) ||
+        !glmfast::cuda_ok(cudaMemcpyAsync(F->head_x, W.head_x, (size_t) g_.n_embd * sizeof(float),
+                                         cudaMemcpyDeviceToDevice, F->cs), "stream last hidden", err) ||
+        !glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "stream tail completion", err)) {
+        stage_failed_ = true; return false;
+    }
+    last_tok_ = result.picks[0]; mtp_hx_pos_ = p0;
+    return true;
+}
+
+bool Glm5Model::stage_stream_token(int32_t token, int32_t next_guess, bool& hit,
+                                   std::vector<float>& logits, std::string& err) {
+    if (!remote_front_ || token < 0 || token >= g_.n_vocab || next_guess < -1 || next_guess >= g_.n_vocab) {
+        err = "invalid explicit stream token"; return false;
+    }
+    cudaSetDevice(dev_);
+    if (!mtp_fill_prev(token, pos_, err) || !remote_stream_apply(token, next_guess, hit, err)) return false;
+    logits.resize((size_t) g_.n_vocab);
+    return glmfast::cuda_ok(cudaMemcpy(logits.data(), sc_ + sc_logits, logits.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost), "stream diagnostic logits", err);
+}
+
+bool Glm5Model::stage_stream_finish(std::string& err) {
+    if (!remote_front_ || stage_window_pending_ || stage_failed_) { err = "invalid stream finish state"; return false; }
+    if (!remote_front_->stream_end(err)) { stage_failed_ = true; return false; }
+    return true;
+}
+
+bool Glm5Model::stage_discard(std::string& err) {
+    if (!stage_windows_enabled_ || remote_front_ || l1_ >= g_.n_layers || !stage_window_pending_ ||
+        stage_failed_ || !fast_ || fast_->win.T != 1) {
+        err = "stage discard requires one pending front-only token"; return false;
+    }
+    cudaSetDevice(dev_);
+    const auto p0 = fast_->win.p0;
+    win_commit_part(0);
+    if (!glmfast::cuda_ok(cudaStreamSynchronize(fast_->cs), "stage discard completion", err) || !fast_->route_ok(err)) {
+        stage_failed_ = true; return false;
+    }
+    pos_ = p0; fast_->win.T = 0; stage_window_pending_ = false;
+    return true;
+}
+
 bool Glm5Model::remote_prefill(const std::vector<int32_t>& tokens, std::string& err) {
     // Correctness-first remote path: bounded batched verification windows preserve both stage states and NextN's
     // cache. This is not yet the large tensor-core prefill path; report its TTFT separately, never silently mix it
@@ -1346,8 +1404,10 @@ bool Glm5Model::window_impl(const int32_t* tokens, int T, int32_t* out, std::str
         }
         if (!m->win_alloc(kWinMax, err)) return false;
         if (!m->fast_boundary(err)) return false;
-        // (a window of one token keeps it: nothing to restore)
-        if (T > 1 && !m->spec_kda_copy(false)) {
+        // An ordinary T1 is always kept. A remote front stage may instead discard a speculative
+        // T1 when the tail selects another token, so it needs the same pre-window state backup.
+        const bool may_discard_front = stage != nullptr && !have_head;
+        if ((T > 1 || may_discard_front) && !m->spec_kda_copy(false)) {
             err = "glm window: the recurrent-state backup did not allocate";
             return false;
         }
@@ -2287,7 +2347,9 @@ bool Glm5Model::window_commit(int n_keep, std::string& err, bool wait) {
     }
     const int T = fast_->win.T;
     const int64_t p0 = fast_->win.p0;
-    if (remote_front_ && !remote_front_->commit(n_keep, err)) { stage_failed_ = true; return false; }
+    if (remote_front_ && remote_front_->streaming()) {
+        if (T != 1 || n_keep != 1) { err = "remote stream only commits its actual token locally"; return false; }
+    } else if (remote_front_ && !remote_front_->commit(n_keep, err)) { stage_failed_ = true; return false; }
     // a pipelined window's parts each enqueue their own restore and replay on their crew thread, at once (one after
     // the other here, ~0.5 ms of the round on 9 GPUs between the last pick and the next anchor); this waits for the
     // enqueues, so the state is committed in stream order when it returns, as below

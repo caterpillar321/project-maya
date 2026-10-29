@@ -15,6 +15,11 @@ void require(bool ok, const std::string& msg) {
     if (!ok) { std::fprintf(stderr, "REMOTE MODEL FAIL: %s\n", msg.c_str()); std::exit(1); }
 }
 int pick(const float* p, size_t n) { return (int) (std::max_element(p, p+n)-p); }
+void sequence_difference(const std::vector<int>& a, const std::vector<int>& b, const char* label) {
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+        if (a[i] != b[i]) { std::fprintf(stderr, "%s first mismatch at %zu: plain=%d speculative=%d\n", label, i, a[i], b[i]); return; }
+    if (a.size() != b.size()) std::fprintf(stderr, "%s size mismatch %zu/%zu\n", label, a.size(), b.size());
+}
 void compare(const float* reference, const float* result, size_t n, const char* label) {
     double max_abs = 0, sum_sq = 0, ref_sq = 0;
     for (size_t i = 0; i < n; ++i) {
@@ -95,6 +100,37 @@ int main(int argc, char** argv) {
     require(model.forward({tokens[33]}, logits, err), err);
     compare(reference[33].data(), logits.data(), V, "paired prefix restore");
 
+    // Front speculation must preserve exact target logits for forced hits, forced misses and cancellation.
+    // The first reference epoch may differ after explicit helper refresh, so regenerate for the current one.
+    model.reset(); reference.clear();
+    for (int32_t t : tokens) {
+        require(model.forward({t}, logits, err), err);
+        reference.push_back(logits);
+    }
+    for (int pre : {0, 31}) for (int mode : {0, 1, 2}) {
+        model.reset();
+        if (pre) require(model.forward(std::vector<int32_t>(tokens.begin(), tokens.begin()+pre), logits, err), err);
+        for (int i = 0; i < 8; ++i) {
+            const bool wrong = mode == 1 || (mode == 2 && (i & 1));
+            const int32_t guess = tokens[pre+i+1] + (wrong ? 1 : 0);
+            bool hit = false;
+            require(model.stage_stream_token(tokens[pre+i], guess, hit, logits, err), err);
+            const bool prior_wrong = mode == 1 || (mode == 2 && ((i-1) & 1));
+            require(hit == (i > 0 && !prior_wrong), "worker cache-hit identity");
+            compare(reference[pre+i].data(), logits.data(), V, "stream forced hit/miss");
+        }
+        require(model.stage_stream_finish(err), err); // discards an unused ninth-token guess
+        require(model.position() == pre+8, "stream finish preserves committed prefix");
+        require(model.forward({tokens[pre+8]}, logits, err), err);
+        compare(reference[pre+8].data(), logits.data(), V, "plain after stream end");
+    }
+    model.reset();
+    bool hit = false;
+    require(model.stage_stream_token(tokens[0], tokens[1], hit, logits, err), err);
+    model.reset(); // reset while the worker is computing a speculative next token
+    require(model.forward({tokens[0]}, logits, err), err);
+    compare(reference[0].data(), logits.data(), V, "reset during front speculation");
+
     // Native MTP must match the SAME distributed trunk's ordinary greedy generation, including state after rejection.
     model.reset();
     require(model.forward(prefix, logits, err), err);
@@ -116,6 +152,7 @@ int main(int argc, char** argv) {
     std::vector<int> mtp;
     int64_t produced = 0;
     require(model.decode_mtp(sampler, 24, [&](int token) { mtp.push_back(token); return true; }, produced, err), err);
+    sequence_difference(plain, mtp, "greedy");
     require(produced == 24 && plain == mtp, "native MTP greedy output equals distributed plain decode");
     model.reset();
     require(model.forward(prefix, logits, err), err);
@@ -131,7 +168,14 @@ int main(int argc, char** argv) {
     require(model.forward(prefix, logits, err), err);
     sampled.counter = 0; produced = 0;
     require(model.decode_mtp(sampled, 24, [&](int token) { mtp.push_back(token); return true; }, produced, err), err);
+    sequence_difference(plain, mtp, "sampled");
     require(produced == 24 && plain == mtp, "fixed-seed sampled MTP equals distributed plain decode");
+    model.reset();
+    require(model.forward(prefix, logits, err), err);
+    produced = 0; int callbacks = 0;
+    require(model.decode_mtp(sampler, 24, [&](int) { return ++callbacks < 7; }, produced, err), err);
+    require(produced == 7 && model.position() == (int64_t) prefix.size()+6, "decode callback cancellation drains stages");
+    require(model.snapshot_save(), "snapshot allowed after cancelled generation");
     model.fast_prof_flush();
     std::printf("glm_remote_model_test: PASS (%d checks; T2/T3 every keep, pool boundaries, snapshot, MTP)\n", checks);
 }

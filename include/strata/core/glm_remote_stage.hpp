@@ -6,9 +6,10 @@
 
 namespace strata::core::stageproto {
 // Experimental homogeneous x86-64 protocol. FP32 residuals are transmitted without quantization.
-constexpr uint32_t magic = 0x3153474d, version = 1, reply = 1, failure = 2;
+constexpr uint32_t magic = 0x3153474d, version = 2, reply = 1, failure = 2, cache_hit = 4;
 constexpr uint32_t max_payload = 16 * 4 * 4096 * sizeof(float);
-enum Op : uint32_t { Hello = 1, Verify = 2, Commit = 3, Reset = 4, Save = 5, Restore = 6, Close = 7 };
+enum Op : uint32_t { Hello = 1, Verify = 2, Commit = 3, Reset = 4, Save = 5, Restore = 6, Close = 7,
+                     StreamStep = 8, StreamEnd = 9 };
 struct Header {
     uint32_t magic_value = magic, version_value = version, op = 0, flags = 0;
     uint64_t session = 0, sequence = 0, window = 0;
@@ -45,11 +46,17 @@ public:
     bool reset(std::string& err);
     bool save(int64_t position, std::string& err);
     bool restore(int64_t position, std::string& err);
+    bool stream_step(int64_t position, int32_t token, int32_t next_guess, std::vector<float>& residual,
+                     bool& hit, std::string& err);
+    bool stream_end(std::string& err);
+    bool streaming() const { return streaming_; }
     bool ready() const { return fd_ >= 0; }
     bool pending() const { return pending_rows_ > 0; }
     void close();
 private:
     int fd_ = -1, pending_rows_ = 0;
+    bool streaming_ = false;
+    int32_t stream_guess_ = -1;
     int64_t position_ = 0, pending_position_ = 0, snapshot_position_ = -1;
     uint64_t session_ = 0, sequence_ = 0, window_ = 0;
     stageproto::Info info_{};

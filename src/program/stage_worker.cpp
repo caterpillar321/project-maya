@@ -75,6 +75,10 @@ int main(int argc, char** argv) {
     uint64_t sequence = 0, last_window = 0, active_window = 0;
     int64_t active_position = 0;
     int64_t saved_position = -1;
+    bool streaming = false;
+    int64_t stream_position = 0;
+    int32_t cached_token = -1;
+    strata::core::Glm5Model::StageWindowResult cached;
     std::fprintf(stderr, "stage worker ready: session %llu, layers [0,%d), FP32 boundary\n",
                  (unsigned long long) session, cut);
     for (;;) {
@@ -94,8 +98,9 @@ int main(int argc, char** argv) {
         sequence = h.sequence;
         st::Header response = h; response.flags = st::reply;
         strata::core::Glm5Model::StageWindowResult result;
+        int32_t next_prefetch = -1;
         if (ok && h.op == st::Verify) {
-            ok = h.rows > 0 && h.rows <= 16 && data.size() == h.rows * sizeof(int32_t) &&
+            ok = !streaming && h.rows > 0 && h.rows <= 16 && data.size() == h.rows * sizeof(int32_t) &&
                  h.position == model.position() && h.window == last_window + 1 && !model.stage_window_pending();
             if (ok) {
                 std::vector<int32_t> tokens(h.rows);
@@ -104,25 +109,59 @@ int main(int argc, char** argv) {
                 if (ok) { active_window = last_window = h.window; active_position = h.position; }
             }
         } else if (ok && h.op == st::Commit) {
-            ok = data.empty() && h.window == active_window && active_window != 0 && h.position == active_position &&
+            ok = !streaming && data.empty() && h.window == active_window && active_window != 0 && h.position == active_position &&
                  model.stage_commit((int) h.rows, err);
             if (ok) active_window = 0;
         } else if (ok && h.op == st::Reset) {
             ok = data.empty() && !h.rows && !h.window && !h.position;
-            if (ok) { model.reset(); active_window = 0; saved_position = -1; }
+            if (ok) {
+                model.reset(); active_window = 0; saved_position = -1;
+                streaming = false; stream_position = 0; cached_token = -1; cached = {};
+            }
         } else if (ok && h.op == st::Save) {
-            ok = data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
+            ok = !streaming && data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
                  h.position == model.position() && model.snapshot_save();
             if (ok) saved_position = h.position;
         } else if (ok && h.op == st::Restore) {
-            ok = data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
+            ok = !streaming && data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
                  h.position == saved_position && h.position == model.snapshot_pos() && model.snapshot_restore();
+        } else if (ok && h.op == st::StreamStep) {
+            ok = h.rows == 1 && data.size() == 2 * sizeof(int32_t) && h.window == last_window + 1 &&
+                 active_window == 0 && (streaming || !model.stage_window_pending());
+            int32_t input[2] = {-1, -1};
+            if (ok) std::memcpy(input, data.data(), sizeof(input));
+            const int64_t position = streaming ? stream_position : model.position();
+            ok = ok && h.position == position && position < info.context && input[0] >= 0 &&
+                 (uint32_t) input[0] < info.vocab && input[1] >= -1 &&
+                 (input[1] < 0 || ((uint32_t) input[1] < info.vocab && position + 1 < info.context));
+            if (ok && cached_token >= 0) {
+                ok = model.stage_window_pending() && model.position() == position + 1;
+                if (ok && cached_token == input[0]) {
+                    result = std::move(cached);
+                    response.flags |= st::cache_hit;
+                } else if (ok) ok = model.stage_discard(err);
+            }
+            if (ok && result.residual.empty())
+                ok = model.position() == position && model.stage_window(input, 1, nullptr, 0, result, err);
+            if (ok) ok = model.stage_commit(1, err);
+            if (ok) {
+                stream_position = position + 1; streaming = true;
+                cached_token = -1; cached = {};
+                last_window = h.window; next_prefetch = input[1];
+            }
+        } else if (ok && h.op == st::StreamEnd) {
+            ok = streaming && data.empty() && !h.rows && !h.window && h.position == stream_position;
+            if (ok && cached_token >= 0) ok = model.stage_discard(err);
+            if (ok) {
+                ok = model.position() == stream_position && !model.stage_window_pending();
+                streaming = false; cached_token = -1; cached = {};
+            }
         } else if (ok && h.op == st::Close && data.empty() && !h.rows && !h.window) {
             return 0;
         } else ok = false;
         if (!ok) {
             if (err.empty()) err = "invalid stage request identity, shape, position or lifecycle";
-            response.flags |= st::failure;
+            response.flags = st::reply | st::failure;
             if (err.size() > 1024) err.resize(1024);
             std::string io_err;
             st::send_packet(fd, response, err.data(), err.size(), io_err);
@@ -132,6 +171,14 @@ int main(int argc, char** argv) {
         const void* payload = result.residual.empty() ? nullptr : result.residual.data();
         if (!st::send_packet(fd, response, payload, result.residual.size() * sizeof(float), err)) {
             std::fprintf(stderr, "%s\n", err.c_str()); return 1;
+        }
+        // The actual token's response is already on the wire. Compute the next guess while the coordinator
+        // runs its current tail; only this one tentative token may stand beyond the committed prefix.
+        if (next_prefetch >= 0) {
+            if (!model.stage_window(&next_prefetch, 1, nullptr, 0, cached, err)) {
+                std::fprintf(stderr, "stage stream prefetch: %s\n", err.c_str()); return 1;
+            }
+            cached_token = next_prefetch;
         }
     }
 }

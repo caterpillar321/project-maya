@@ -874,13 +874,19 @@ public:
                       StageWindowResult& result, std::string& err,
                       const strata::kernels::SamplerParams* sp = nullptr, bool capture_logits = false);
     bool stage_commit(int keep, std::string& err);
+    bool stage_discard(std::string& err); // front-only: discard one uncommitted speculative token
     bool stage_window_pending() const { return stage_window_pending_; }
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
     bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
     bool remote_front_enabled() const { return remote_front_ != nullptr; }
     /// Explicit idle boundary after prefill, BEFORE generation. Decode windows never reassign stage helpers.
     bool refresh_stage_helper(std::string& err);
+    bool stage_stream_token(int32_t token, int32_t next_guess, bool& hit, std::vector<float>& logits, std::string& err);
+    bool stage_stream_finish(std::string& err);
 private:
+    bool remote_stream_apply(int32_t token, int32_t next_guess, bool& hit, std::string& err);
+    bool decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t max_new,
+                              const std::function<bool(int)>& emit, int64_t& produced, std::string& err);
     std::unique_ptr<GlmRemoteStage> remote_front_;
     bool remote_token(int32_t token, std::string& err);
     bool remote_prefill(const std::vector<int32_t>& tokens, std::string& err);

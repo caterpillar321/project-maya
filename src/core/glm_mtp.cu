@@ -535,6 +535,72 @@ int Glm5Model::mtp_choose(int n_cap) {
 }
 
 // ---------------------------------------------------------------- the decode
+bool Glm5Model::decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t max_new,
+                                     const std::function<bool(int)>& emit, int64_t& produced, std::string& err) {
+    produced = 0;
+    if (!remote_front_ || stage_window_pending_ || stage_failed_ || remote_front_->streaming()) {
+        err = "remote pipeline needs an idle remote model"; return false;
+    }
+    if (max_new <= 0) return true;
+    FastState* F = fast_;
+    cudaSetDevice(dev_);
+    int y = sp.greedy && sp.penalty_last_n <= 0 && last_tok_ >= 0 ? last_tok_ : fast_sample(sp, err);
+    if (y < 0) return false;
+    y = forced(y); ++sp.counter; last_tok_ = y; ++produced;
+    const auto note = [&](int token) {
+        const bool outside = !mtp_vin_.empty() && token >= 0 && token < (int) mtp_vin_.size() && !mtp_vin_[(size_t) token];
+        mtp_out_ += ((outside ? 1.0 : 0.0) - mtp_out_) / 64.0;
+    };
+    note(y);
+    if (!emit(y) || produced >= max_new || pos_ + 1 >= max_ctx_) return true;
+    using Clock = std::chrono::steady_clock;
+    int32_t previous_guess = -1;
+    uint64_t steps = 0, candidates = 0, hits = 0;
+    double draft_ms = 0, apply_ms = 0;
+    bool ok = true;
+    while (produced < max_new && pos_ + 1 < max_ctx_) {
+        const int64_t p0 = pos_;
+        const auto draft_start = Clock::now();
+        int32_t next_guess = -1;
+        if (produced + 1 < max_new && p0 > 0 && mtp_hx_pos_ == p0 - 1) {
+            // A fresh one-step NextN prediction from the TRUE previous trunk state. Its cache row is
+            // therefore already canonical; no recursive guessed hidden state enters later drafting.
+            const bool sub = F->mtp_dv > 0 && mtp_out_ < 0.02;
+            if (!fast_mtp(p0 - 1, y, err, 0, sub, true) ||
+                !glmfast::wait_event(F->ev_mtp, "remote pipeline draft", err) || !F->route_ok(err)) {
+                ok = false; break;
+            }
+            next_guess = F->mtp_tok_h[0];
+        } else if (!mtp_fill_prev(y, p0, err)) { ok = false; break; }
+        draft_ms += std::chrono::duration<double, std::milli>(Clock::now() - draft_start).count();
+        const auto apply_start = Clock::now();
+        bool hit = false;
+        if (!remote_stream_apply(y, next_guess, hit, err)) { ok = false; break; }
+        apply_ms += std::chrono::duration<double, std::milli>(Clock::now() - apply_start).count();
+        ++steps;
+        if (previous_guess >= 0) {
+            ++candidates; hits += hit;
+            ++spec_steps_; spec_hits_ += hit;
+        }
+        previous_guess = next_guess;
+        int next = sp.greedy && sp.penalty_last_n <= 0 ? last_tok_ : fast_sample(sp, err);
+        if (next < 0) { ok = false; break; }
+        next = forced(next); ++sp.counter; last_tok_ = next; ++produced;
+        y = next; note(y);
+        if (!emit(y)) break;
+    }
+    if (ok) ok = stage_stream_finish(err);
+    if (!ok) {
+        // Never continue from one host's partially advanced stream. Reset/reload is required.
+        stage_failed_ = true; remote_front_->close();
+    }
+    if (steps) std::fprintf(stderr, "glm remote pipeline: %llu steps, %llu/%llu front guesses reused; "
+                                   "draft %.3f ms/step, front wait + tail %.3f ms/step\n",
+                            (unsigned long long) steps, (unsigned long long) hits, (unsigned long long) candidates,
+                            draft_ms / steps, apply_ms / steps);
+    return ok;
+}
+
 bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                            int64_t& produced, std::string& err) {
     produced = 0;
@@ -542,6 +608,8 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
         err = "glm mtp: the MTP decode is not set up on this model";
         return false;
     }
+    if (const char* pipeline = getenv("STRATA_GLM_REMOTE_PIPELINE"); pipeline && std::strcmp(pipeline, "1") == 0)
+        return decode_remote_stream(sp, max_new, emit, produced, err);
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     const int64_t E = g.n_embd;

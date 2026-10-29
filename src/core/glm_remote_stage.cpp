@@ -38,8 +38,11 @@ bool same_info(const Info& a, const Info& b) {
            a.top_k == b.top_k && a.nextn == b.nextn && a.kv_bits == b.kv_bits && a.kv_resident == b.kv_resident;
 }
 bool valid_header(const Header& h, std::string& err) {
-    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > Close ||
-        h.flags > (reply | failure) || (h.flags == failure) || h.bytes > max_payload || h.rows > 16 || h.position < 0) {
+    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > StreamEnd ||
+        (h.flags & ~(reply | failure | cache_hit)) ||
+        ((h.flags & (failure | cache_hit)) && !(h.flags & reply)) ||
+        ((h.flags & cache_hit) && (h.op != StreamStep || (h.flags & failure))) ||
+        h.bytes > max_payload || h.rows > 16 || h.position < 0) {
         err = "stage protocol: invalid magic/version/op/flags/shape"; return false;
     }
     return true;
@@ -136,7 +139,10 @@ uint64_t manifest_hash(const std::string& pack, std::string& err) {
 namespace strata::core {
 namespace st = stageproto;
 GlmRemoteStage::~GlmRemoteStage() { close(); }
-void GlmRemoteStage::close() { if (fd_ >= 0) ::close(fd_); fd_ = -1; pending_rows_ = 0; }
+void GlmRemoteStage::close() {
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = -1; pending_rows_ = 0; streaming_ = false; stream_guess_ = -1;
+}
 bool GlmRemoteStage::open(const std::string& endpoint, const st::Info& expected, std::string& err) {
     const int fd = st::accept_one(endpoint, err);
     return fd >= 0 && open_connected(fd, expected, err);
@@ -174,7 +180,7 @@ bool GlmRemoteStage::exchange(st::Header h, const void* p, size_t n, st::Header&
     return true;
 }
 bool GlmRemoteStage::verify(int64_t p0, const int32_t* tokens, int rows, std::vector<float>& residual, std::string& err) {
-    if (pending() || rows < 1 || rows > 16 || tokens == nullptr || p0 != position_ || p0 > info_.context - rows) {
+    if (pending() || streaming_ || rows < 1 || rows > 16 || tokens == nullptr || p0 != position_ || p0 > info_.context - rows) {
         err = "stage verify position/window mismatch"; return false;
     }
     for (int i = 0; i < rows; ++i) if (tokens[i] < 0 || (uint32_t) tokens[i] >= info_.vocab) {
@@ -210,22 +216,49 @@ bool GlmRemoteStage::control(uint32_t op, int64_t position, uint32_t rows, std::
     return true;
 }
 bool GlmRemoteStage::commit(int keep, std::string& err) {
-    if (!pending() || keep < 1 || keep > pending_rows_) { err = "invalid stage commit"; return false; }
+    if (streaming_ || !pending() || keep < 1 || keep > pending_rows_) { err = "invalid stage commit"; return false; }
     if (!control(st::Commit, pending_position_, keep, err)) return false;
     position_ = pending_position_ + keep; pending_rows_ = 0; return true;
 }
 bool GlmRemoteStage::reset(std::string& err) {
     if (!control(st::Reset, 0, 0, err)) return false;
-    position_ = 0; pending_rows_ = 0; snapshot_position_ = -1; return true;
+    position_ = 0; pending_rows_ = 0; snapshot_position_ = -1; streaming_ = false; stream_guess_ = -1; return true;
 }
 bool GlmRemoteStage::save(int64_t position, std::string& err) {
-    if (pending() || position != position_) { err = "invalid stage snapshot position"; return false; }
+    if (pending() || streaming_ || position != position_) { err = "invalid stage snapshot position"; return false; }
     if (!control(st::Save, position, 0, err)) return false;
     snapshot_position_ = position; return true;
 }
 bool GlmRemoteStage::restore(int64_t position, std::string& err) {
-    if (pending() || position < 0 || position != snapshot_position_) { err = "stage snapshot unavailable"; return false; }
+    if (pending() || streaming_ || position < 0 || position != snapshot_position_) { err = "stage snapshot unavailable"; return false; }
     if (!control(st::Restore, position, 0, err)) return false;
     position_ = position; return true;
+}
+bool GlmRemoteStage::stream_step(int64_t position, int32_t token, int32_t next_guess,
+                                 std::vector<float>& residual, bool& hit, std::string& err) {
+    hit = false;
+    if (pending() || position != position_ || position >= info_.context || token < 0 ||
+        (uint32_t) token >= info_.vocab || next_guess < -1 ||
+        (next_guess >= 0 && ((uint32_t) next_guess >= info_.vocab || position + 1 >= info_.context))) {
+        err = "stage stream token/position mismatch"; return false;
+    }
+    const bool expected_hit = streaming_ && stream_guess_ == token;
+    const int32_t input[2] = {token, next_guess};
+    st::Header h; h.op = st::StreamStep; h.position = position; h.rows = 1; h.window = ++window_;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, input, sizeof(input), a, data, err)) return false;
+    const size_t floats = (size_t) info_.hc * info_.embd;
+    if (a.position != position + 1 || a.rows != 1 || data.size() != floats * sizeof(float) ||
+        bool(a.flags & st::cache_hit) != expected_hit) {
+        err = "stage stream response shape/position/cache identity mismatch"; close(); return false;
+    }
+    residual.resize(floats); std::memcpy(residual.data(), data.data(), data.size());
+    hit = expected_hit; position_ = position + 1; streaming_ = true; stream_guess_ = next_guess;
+    return true;
+}
+bool GlmRemoteStage::stream_end(std::string& err) {
+    if (!streaming_) return ready();
+    if (!control(st::StreamEnd, position_, 0, err)) return false;
+    streaming_ = false; stream_guess_ = -1; return true;
 }
 } // namespace strata::core

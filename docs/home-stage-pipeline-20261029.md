@@ -46,9 +46,9 @@ main RAM92/headroom20/class slots6600,304; front RAM44/headroom8.
 | 대화4개 평균 | 15.380 | 13.558 |
 | 코드4개 평균 | 16.012 | 16.308 |
 
-현재는 합쳐서 기다립니다(직렬 대화34.5/코드30.9tok/s). 실제 파이프라인에서는 느린 단계에
+직렬 기준선은 합쳐서 기다립니다(대화34.5/코드30.9tok/s). 실제 파이프라인에서는 느린 단계에
 추가 drafting/통신/오예측 복구 비용이 붙습니다. 이 수치는 파이프라인에서50이 나왔다는 뜻이 아닙니다.
-다음 구현은 보조가 다음 토큰의 front를 추측해서 계산하고, 메인이 현재 토큰의 tail을 계산하는
+구현한 경로는 보조가 다음 토큰의 front를 추측해서 계산하고, 메인이 현재 토큰의 tail을 계산하는
 단일 토큰 파이프라인입니다. 틀린 front 추측은 recurrent state를 복원하고 정확한 token으로 재실행합니다.
 최종 출력은 항상 main verifier의 샘플만 사용합니다.
 
@@ -56,3 +56,44 @@ main RAM92/headroom20/class slots6600,304; front RAM44/headroom8.
 `/home/caterpillar/Agent/maya-dual-host-design-20261029/home/`.
 주요 실행은 canonical-test/speed-20261029k, canonical-t3-speed-20261029l,
 timing16-test-20261029m, timing16-t1-speed-20261029m입니다.
+
+## 실제 파이프라인 검증 및 첫 50 tok/s 통과
+
+`MAYA_GLM_REMOTE_PIPELINE=1`로 위 cut16 구성을 사용합니다. 양쪽 stage protocol v2 바이너리가
+필요하며 v1과 섞지 않습니다. 이 경로는 `MTP_FIXED`의 배치 길이 대신 매 단계 NextN 한 토큰
+예측을 사용합니다. 실제 토큰의 front 결과를 먼저 전송한 뒤, worker가 다음 예측의 front를
+계산하는 동안 main은 현재 토큰의 tail을 실행합니다. 예측 일치 시 결과를 재사용하고,
+불일치 시 front recurrent/conv 상태를 복원한 뒤 실제 토큰을 다시 계산합니다.
+목표 모델의 샘플러가 최종 토큰을 결정하며 가중치/KV/전송 정밀도를 낮추지 않았습니다.
+
+T1은 무조건 채택한다는 기존 가정 때문에 front T1의 상태 백업이 누락되어 있었습니다.
+front stage는 T1도 백업하도록 수정했습니다. 수정 후 실모델 검사에서 전체 어휘 logits
+130회 비교 모두 max_abs=0. 강제 hit/miss/교대, pooling 경계, stream 종료/reset,
+greedy 및 고정 seed sampled 24-token 출력 일치, callback 취소 후 snapshot을 통과했습니다.
+CPU CTest 4개와 transport 103 checks, transport ASan/UBSan도 통과했습니다.
+
+원본 qshort 첫 실행 (chat/code 각각4개×200토큰):
+
+| 구성 | 대화 tok/s | 코드 tok/s |
+|---|---:|---:|
+| 이전 최고 cut12 T2 canonical | 41.5 | 35.6 |
+| 새 cut16 토큰 파이프라인 첫 실행 | **55.5** | **50.4** |
+| 같은 엔진 원본 하네스 재실행 | **55.7** | **50.6** |
+
+두 실행 모두 같은 greedy MD5였고 재실행 RAM fetches도18.6/27.2였습니다.
+첫 실행은 이전 최고 대비 +33.7%/+41.6%; 직렬 cut16 대비 +60.9%/+63.1%입니다.
+main RAM fetches/output-token은 대화18.6, 코드27.2. 첫 실행 전체 CPU 사용률은
+main174.6%, front659.0% (논리 코어 하나=100%)였습니다.
+greedy MD5는 `8a689b1f560a3b1e6f2c4f2edc2021af`입니다.
+고정 CPU 소유권/분할이 다른 cut12 최고 구성의 해시와 같다고 주장하지 않습니다.
+같은 cut16 구성 안의 일반 디코드/파이프라인 출력 동등성은 별도로 실모델 검사했습니다.
+
+첫 실행 front 예측 재사용률: 대화689/792=87.0%, 코드700/792=88.4%.
+코딩의 더 느린 속도는 낮은 예측 적중률이 아닌 더 많은 RAM 전문가 전송과 tail 비용에
+대응합니다. 이전 cut12 T2에서도 main RAM fetches는 대화28.5/코드43.1 per output token으로
+코딩이51% 많았습니다. 요청별 전문가 분포가 달라 고정 공통 배치만으로는 한계가 있으며,
+이번 변경은 두 단계의 시간을 합산하던 실행 의존성을 겹쳐서 큰 개선을 얻었습니다.
+
+실행 원자료: `remote-stage-stream-test-20261029o`, `remote-stage-stream-speed-20261029o`.
+API18100은 새 개발 엔진으로 유지합니다. 이 결과는 짧은 하네스의 평균 디코드 속도이며,
+긴 문맥/긴 출력/프리필까지 모두50을 보장하는 측정은 아닙니다.

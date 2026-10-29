@@ -2788,7 +2788,8 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
 bool Glm5Model::refresh_stage_helper(std::string& err) {
     FastState* F = fast_;
     if (!stage_windows_enabled_ || !remote_front_ || !F || F->helper.device() < 0 || F->helper.integrated() ||
-        !F->net.empty() || F->stage_ram_canonical || stage_window_pending_ || stage_failed_ || remote_front_->pending()) {
+        !F->net.empty() || F->stage_ram_canonical || stage_window_pending_ || stage_failed_ ||
+        remote_front_->pending() || remote_front_->streaming()) {
         err = "GLM stage refresh: needs an idle remote coordinator with a discrete local helper";
         return false;
     }
