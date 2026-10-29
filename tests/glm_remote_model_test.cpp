@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
     std::vector<std::vector<float>> reference;
     if (refresh) {
         std::vector<float> warm;
+        model.observe_stage_helper_usage();
         require(model.forward(tokens, warm, err), err);
         const auto position = model.position();
         require(model.refresh_stage_helper(err), err);
@@ -217,6 +218,22 @@ int main(int argc, char** argv) {
             require(model.forward({tokens[0]},logits,err),err);
             compare(reference[0].data(),logits.data(),V,"reset after streamed prefill cancellation");
         }
+    }
+
+    if (refresh && batch_pf) {
+        model.reset(); require(model.prefill(prefix, err, tokens[33]), err);
+        std::vector<float> before;
+        require(model.forward({}, before, err), err);
+        const auto position = model.position();
+        require(model.refresh_stage_helper(err), err);
+        require(model.position() == position, "refresh after batch preserves position");
+        require(model.forward({}, logits, err), err);
+        compare(before.data(), logits.data(), V, "helper refresh preserves current head");
+        require(model.snapshot_save(), "snapshot after batch and helper exchange");
+        require(model.forward({tokens[33]}, before, err), err);
+        require(model.snapshot_restore(), "restore after batch and helper exchange");
+        require(model.forward({tokens[33]}, logits, err), err);
+        compare(before.data(), logits.data(), V, "helper exchange snapshot continuation");
     }
 
     // Front speculation must preserve exact target logits for forced hits, forced misses and cancellation.

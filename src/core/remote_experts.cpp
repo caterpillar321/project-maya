@@ -158,6 +158,18 @@ bool GlmExpertHelper::insert(int key, const uint8_t* host, size_t bytes, size_t 
     return true;
 }
 
+bool GlmExpertHelper::readback(int key, uint8_t* host, size_t bytes, std::string& err) {
+    if (key < 0 || (size_t) key >= slots_.size() || !owns(key) || !host ||
+        bytes != slots_[(size_t) key].bytes || integrated_) {
+        err = "GLM expert helper: invalid discrete readback"; return false;
+    }
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    return check(cudaMemcpyAsync(host, slots_[(size_t) key].device, bytes, cudaMemcpyDeviceToHost, stream_),
+                 "cache readback", err, device_) &&
+           check(cudaStreamSynchronize(stream_), "cache readback finish", err, device_);
+}
+
 bool GlmExpertHelper::replace(int out, int in, const uint8_t* host, std::string& err) {
     if (out < 0 || (size_t) out >= slots_.size() || in < 0 || (size_t) in >= slots_.size() || !owns(out) || owns(in)) {
         err = "GLM expert helper: invalid cache replacement"; return false;
@@ -193,7 +205,7 @@ bool GlmExpertHelper::replace(int out, int in, const uint8_t* host, std::string&
 // with a hotter unowned expert of the SAME layer. Pending primary admissions
 // are included in `primary` by the caller before this idle-boundary operation.
 std::vector<GlmExpertHelper::Swap> GlmExpertHelper::swaps(const std::vector<uint32_t>& usage,
-        const std::vector<int>& primary, int ne, int max_swaps) const {
+        const std::vector<int>& primary, int ne, int max_swaps, bool primary_floor) const {
     std::vector<Swap> result;
     for (size_t base = 0; base < owned_.size(); base += ne) {
         std::vector<std::pair<uint32_t, int>> candidates, victims;
@@ -207,7 +219,7 @@ std::vector<GlmExpertHelper::Swap> GlmExpertHelper::swaps(const std::vector<uint
         std::sort(candidates.begin(), candidates.end(), [](auto a, auto b) { return a.first > b.first; });
         std::sort(victims.begin(), victims.end());
         for (size_t i = 0; i < std::min(candidates.size(), victims.size()); ++i) {
-            if (victims[i].first > primary_cold || candidates[i].first < victims[i].first + 2u) break;
+            if ((primary_floor && victims[i].first > primary_cold) || candidates[i].first < victims[i].first + 2u) break;
             result.push_back({candidates[i].first - victims[i].first, candidates[i].second, victims[i].second});
         }
     }

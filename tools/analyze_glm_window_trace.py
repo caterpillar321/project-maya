@@ -3,7 +3,7 @@
 
 This reports sampled CUDA stream intervals, including stalls and host enqueue
 gaps. It does not estimate tokens/second, time per emitted token, pure PCIe
-service, or cross-device overlap. T2 and T3 are always separate groups.
+service, or cross-device overlap. T1, T2 and T3 are always separate groups.
 
 Every sampled attempt must end in a window record, and every request must end
 in a report record. A truncated or malformed log is rejected. Explicit engine
@@ -80,7 +80,7 @@ def _window_identity(record):
     p0 = _integer(record, "p0")
     tokens = _integer(record, "T", 1)
     attempt = _integer(record, "attempt")
-    if tokens not in (2, 3):
+    if tokens not in (1, 2, 3):
         raise TraceError(f"unsupported traced window width: T={tokens}")
     return window, p0, tokens, attempt
 

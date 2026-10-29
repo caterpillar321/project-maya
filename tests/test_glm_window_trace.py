@@ -54,11 +54,11 @@ class WindowTraceTest(unittest.TestCase):
         self.assertEqual(sum(group["stages_mean_ms"].values()), 4.0)
         self.assertEqual(result["requests"][0]["every"], 16)
 
-    def test_t2_t3_never_average_together(self):
-        value = window() + window(17, tokens=3) + [report(2)]
+    def test_t1_t2_t3_never_average_together(self):
+        value = window(tokens=1) + window(17) + window(33, tokens=3) + [report(3)]
         result = TRACE.analyze_records(value)
-        self.assertEqual([group["T"] for group in result["groups"]], [2, 3])
-        self.assertEqual([group["sampled_attempts"] for group in result["groups"]], [1, 1])
+        self.assertEqual([group["T"] for group in result["groups"]], [1, 2, 3])
+        self.assertEqual([group["sampled_attempts"] for group in result["groups"]], [1, 1, 1])
 
     def test_scratch_retry_is_separate_and_unique_sample_count(self):
         value = window(outcome="scratch_retry") + window(attempt=1) + [report()]

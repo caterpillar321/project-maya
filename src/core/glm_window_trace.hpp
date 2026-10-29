@@ -1,4 +1,4 @@
-// Bounded, opt-in stream timeline for the single-trunk batched T2/T3 verifier.
+// Bounded, opt-in stream timeline for single-trunk T1 pipeline / batched T2/T3 windows.
 // Events bracket consecutive work on one stream. These are elapsed intervals,
 // including host submission gaps and waits, NOT isolated kernel/PCIe service times.
 // The caller collects only after its existing window synchronization, and prints
@@ -96,8 +96,10 @@ public:
         cudaSetDevice(previous);
     }
 
+    void skip_window() { abort_active(); selected_ = false; }
+
     // Called once per ordinary window(), after its existing boundary work. The
-    // eligibility gate deliberately excludes pipeline/stagger/retry execution.
+    // eligibility gate excludes intra-window multi-GPU pipelining, stagger and retry execution.
     void begin_window(int64_t p0, int T, int layer_begin, int layer_end, bool supported) {
         abort_active();
         ++serial_;
@@ -105,7 +107,7 @@ public:
         selected_ = false;
         if (!supported) {
             if (++unsupported_ == 1)
-                std::fprintf(stderr, "glm window trace unavailable: requires one trunk, private T2/T3 scratch, "
+                std::fprintf(stderr, "glm window trace unavailable: requires one trunk, private T1/T2/T3 scratch, "
                                      "batched experts and WIN_STAGGER=0; unsupported windows are counted, "
                                      "not attributed\n");
             return;

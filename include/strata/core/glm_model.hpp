@@ -881,7 +881,9 @@ public:
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
     bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
     bool remote_front_enabled() const { return remote_front_ != nullptr; }
-    /// Explicit idle boundary after prefill, BEFORE generation. Decode windows never reassign stage helpers.
+    /// Observe only the following decode's routes, excluding the prompt from helper replanning.
+    void observe_stage_helper_usage();
+    /// Explicit idle request boundary. Decode windows never reassign stage helpers.
     bool refresh_stage_helper(std::string& err);
     bool stage_stream_token(int32_t token, int32_t next_guess, bool& hit, std::vector<float>& logits, std::string& err);
     bool stage_stream_finish(std::string& err);

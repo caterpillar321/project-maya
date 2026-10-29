@@ -755,6 +755,8 @@ struct Glm5Model::FastState {
     std::atomic<uint64_t> window_prefetch_issued{0}, window_prefetch_used{0};
     std::array<uint64_t, 17> stage_timing_n{};
     std::array<double, 17> stage_timing_front_ms{}, stage_timing_tail_ms{};
+    std::array<uint64_t, 2> stream_timing_n{};
+    std::array<double, 2> stream_timing_front_ms{}, stream_timing_tail_ms{};
     std::vector<uint8_t> cpu_owned;
     bool aux_owns(int key) const {
         return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0) ||
@@ -765,6 +767,7 @@ struct Glm5Model::FastState {
     }
     uint8_t* helper_owned_d = nullptr;   // primary router excludes these experts from PCIe admission/prefetch
     uint64_t helper_swaps = 0;
+    std::vector<uint32_t> helper_refresh_usage; // usage at the previous explicit request boundary
     std::atomic<bool> helper_failed{false};
     std::string helper_error;
     std::atomic<uint64_t> helper_experts{0}, helper_routes{0}, helper_us{0};

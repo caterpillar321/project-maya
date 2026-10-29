@@ -1863,6 +1863,16 @@ bool Glm5Model::prefill_return(std::string& err) {
         (S->kv_ss && !glmfast::cuda_ok(cudaStreamSynchronize(S->kv_ss), "glm return KV stage", err))) return false;
     S->kv_next = -1;   // (a prompt that ended early leaves a staged layer nobody waits for)
     std::lock_guard<std::mutex> lk(F->mu);
+    if (const char* audit = getenv("STRATA_GLM_PREFILL_HEAT_AUDIT"); audit && std::atoi(audit)) {
+        std::fprintf(stderr, "glm prefill heat CUDA%d: layer:count_sum", dev_);
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            uint64_t sum = 0;
+            for (int e = 0; e < g_.n_expert; ++e) sum += F->cnt[(size_t) il * g_.n_expert + e];
+            std::fprintf(stderr, " %d:%llu", il, (unsigned long long) sum);
+        }
+        std::fprintf(stderr, "\n");
+    }
     for (int il = l0_; il < lt_; ++il) {
         auto& P = F->lp[(size_t) il];
         for (int s = P.n_main; s < P.n; ++s)
@@ -2964,19 +2974,30 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 staged.push_back(Staged{e, src, dev});
             }
             // the prompt's routing feeds the LFU counts the decode's tiers evict by
+            static const int heat_tokens = [] {
+                const char* v = getenv("STRATA_GLM_PREFILL_HEAT_TOKENS");
+                return v ? std::max(0, std::min(1024, std::atoi(v))) : 0;
+            }();
+            // A long layer-major prompt must not age all earlier layers once for every later layer.
+            // Give each layer the same bounded prompt history, aged locally once per chunk. Decode's
+            // token-major aging and the unscaled usage/route statistics retain their existing meaning.
+            if (heat_tokens) for (int e = 0; e < NE; ++e) F->cnt[(size_t) il * NE + e] >>= 1;
             uint64_t ev = 0;
             for (int e = 0; e < NE; ++e) {
                 const int cnt = std::abs(S->h_counts[e]);
                 if (cnt == 0) continue;
                 uint32_t& cc = F->cnt[(size_t) il * NE + e];
-                cc = (uint32_t) std::min<uint64_t>((uint64_t) cc + (uint64_t) cnt, 1u << 24);
+                const uint64_t add = heat_tokens
+                    ? std::max<uint64_t>(1, ((uint64_t) cnt * std::min(heat_tokens, T) + T / 2) / T)
+                    : (uint64_t) cnt;
+                cc = (uint32_t) std::min<uint64_t>((uint64_t) cc + add, 1u << 24);
                 ev += (uint64_t) cnt;
                 uint32_t& uu = F->usage[(size_t) il * NE + e];
                 uu = (uint32_t) std::min<uint64_t>((uint64_t) uu + (uint64_t) cnt, 1u << 30);
                 if (uu >= (1u << 30))
                     for (auto& u : F->usage) u >>= 1;
             }
-            F->cnt_events += ev;
+            if (!heat_tokens) F->cnt_events += ev;
             while (F->cnt_events >= 32768) {
                 F->cnt_events -= 32768;
                 for (auto& cc : F->cnt) cc >>= 1;

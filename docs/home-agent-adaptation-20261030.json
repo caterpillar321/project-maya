@@ -1,0 +1,67 @@
+{
+  "scope": "Same captured three-turn Pi coding workload: 15 requests and 8696 output tokens. Request bodies, output token IDs, prefix reuse and recorded tool gaps matched. Single paired replay, not a universal throughput guarantee.",
+  "runs": [
+    {
+      "mode": "off",
+      "wall_with_tool_gaps": 266.4591385650001,
+      "request_wall": 252.71258887200065,
+      "prompt_ms": 44280.5,
+      "decode_ms": 205687.0,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 42.392904783808646,
+      "aggregate_speed": 42.27596981079608,
+      "ram_fetch": 39.3105002299908,
+      "mtp_hit": 0.8944149549965382,
+      "refresh_swaps": 0,
+      "refresh_ms": 0
+    },
+    {
+      "mode": "after128b",
+      "wall_with_tool_gaps": 260.12341415300034,
+      "request_wall": 246.37538484200013,
+      "prompt_ms": 44047.1,
+      "decode_ms": 197817.0,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.036327046918124,
+      "aggregate_speed": 43.96304839049541,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6219.243
+    }
+  ],
+  "qshort": {
+    "chat_tok_s": 53.3,
+    "code_tok_s": 50.8,
+    "greedy_md5": "3ced0d2040f5b85d5c70005348fb028f"
+  },
+  "baseline_pipeline_ms": {
+    "main_span": 20.357316095956687,
+    "front_wait": 2.4890178451791267,
+    "draft": 0.8125370349038129
+  },
+  "profile": {
+    "scope": "Separate 14432-token prompt, first 256 output tokens of captured request 12. Sampled CUDA stream intervals include waits/submission gaps; not pure PCIe service time. First sample excluded in the following means.",
+    "sampled_windows": 8,
+    "windows_in_means": 7,
+    "stream_ms": 18.92467657142857,
+    "expert_fetch_ms": 8.286322285714288,
+    "prefetch_join_ms": 0.482756571428571,
+    "dsa_attention_ms": 0.6844205714285713,
+    "host_setup_ms": 0.3,
+    "host_enqueue_ms": 0.93,
+    "host_gpu_wait_ms": 17.81,
+    "host_after_ms": 0.02
+  },
+  "validation": {
+    "actual_weights_roundtrip": true,
+    "native_model_state_mtp_gates": "passed",
+    "replay_token_ids_equal": true,
+    "replay_prefix_reuse_equal": true,
+    "trace_parser_tests": 21,
+    "t1_trace_complete": true
+  },
+  "active_run": "/home/caterpillar/fn/remote-prefill-runs/20261030-084042-57492"
+}

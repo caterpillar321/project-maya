@@ -1215,9 +1215,13 @@ bool Glm5Model::remote_stream_apply(int32_t token, int32_t next_guess, bool& hit
     if (!remote_front_ || stage_window_pending_ || stage_failed_) {
         err = "remote stream requires an idle coordinator"; return false;
     }
+    static const bool timing = getenv("STRATA_GLM_STAGE_TIMING") != nullptr;
+    const bool measure = timing && fast_->tier_audit.active;
+    const auto start = std::chrono::steady_clock::now();
     const int64_t p0 = pos_;
     std::vector<float> residual;
     if (!remote_front_->stream_step(p0, token, next_guess, residual, hit, err)) { stage_failed_ = true; return false; }
+    const auto boundary = std::chrono::steady_clock::now();
     StageWindowResult result;
     if (!stage_window(&token, 1, residual.data(), residual.size(), result, err) ||
         result.picks.size() != 1 || !window_commit(1, err)) {
@@ -1233,6 +1237,13 @@ bool Glm5Model::remote_stream_apply(int32_t token, int32_t next_guess, bool& hit
         stage_failed_ = true; return false;
     }
     last_tok_ = result.picks[0]; mtp_hx_pos_ = p0;
+    if (measure) {
+        const size_t k = hit ? 1 : 0;
+        ++F->stream_timing_n[k];
+        F->stream_timing_front_ms[k] += std::chrono::duration<double, std::milli>(boundary - start).count();
+        F->stream_timing_tail_ms[k] += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - boundary).count();
+    }
     return true;
 }
 
@@ -1372,7 +1383,9 @@ bool Glm5Model::window_impl(const int32_t* tokens, int T, int32_t* out, std::str
         err = "glm window: past the context";
         return false;
     }
-    static const bool hprof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
+    static const bool host_prof = getenv("STRATA_GLM_WIN_PROF") != nullptr ||
+                                  getenv("STRATA_GLM_WIN_HOST_PROF") != nullptr;
+    const bool hprof = host_prof && (!remote_front_ || fast_->tier_audit.active);
     static const bool audit_enabled = [] {
         const char* v = getenv("STRATA_GLM_WIN_AUDIT");
         return v != nullptr && std::atoi(v) != 0;
@@ -1432,16 +1445,16 @@ bool Glm5Model::window_impl(const int32_t* tokens, int T, int32_t* out, std::str
     cudaSetDevice(dev_);
     hlap(WH.h_setup);
     if (audit) WH.audit_setup_ms += audit_ms(audit_start);
-    if (glmfast::WindowTrace::enabled()) {
+    if (glmfast::WindowTrace::enabled() && (!remote_front_ || fast_->tier_audit.active)) {
         if (!fast_->win_trace) fast_->win_trace = std::make_unique<glmfast::WindowTrace>(dev_);
         const char* stagger = getenv("STRATA_GLM_WIN_STAGGER");
-        const bool supported = n_parts_ == 1 && split_next_ == nullptr && (T == 2 || T == 3) &&
+        const bool supported = n_parts_ == 1 && split_next_ == nullptr && (T >= 1 && T <= 3) &&
                                stagger != nullptr && std::atoi(stagger) == 0 &&
                                glmfast::off_by_default_on_amd("STRATA_GLM_WIN_BATCH") &&
                                !WH.piped && WH.mplan_ptr != nullptr && fast_->rows_scr != nullptr &&
                                fast_->win_scratch_rows >= T && fast_->rows_group >= T;
         fast_->win_trace->begin_window(p0, T, l0_, l1_, supported);
-    }
+    } else if (fast_->win_trace) fast_->win_trace->skip_window();
     // a batched pass whose tokens took more scratch slots than a layer has runs again token by token (rare: the tiers
     // land a fetched expert in a spare slot first)
     for (int attempt = 0;; ++attempt) {

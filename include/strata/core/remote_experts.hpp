@@ -26,9 +26,11 @@ public:
     bool reserve(int keys, size_t requested_bytes, std::string& err, size_t headroom = 512ull << 20);
     bool insert(int key, const uint8_t* host, size_t bytes, size_t stride, std::string& err);
     bool replace(int out, int in, const uint8_t* host, std::string& err);
+    // Export the exact stored blob before replacing a discrete helper's sole copy.
+    bool readback(int key, uint8_t* host, size_t bytes, std::string& err);
     struct Swap { uint32_t gain; int in, out; };
     std::vector<Swap> swaps(const std::vector<uint32_t>& usage, const std::vector<int>& primary,
-                            int experts_per_layer, int max_swaps) const;
+                            int experts_per_layer, int max_swaps, bool primary_floor = true) const;
     const std::vector<uint8_t>& owners() const { return owned_; }
     bool owns(int key) const { return !owned_.empty() && owned_[(size_t) key] != 0; }
     bool integrated() const { return integrated_; }

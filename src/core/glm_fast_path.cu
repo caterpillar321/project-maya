@@ -2787,19 +2787,37 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
     return true;
 }
 
+void Glm5Model::observe_stage_helper_usage() {
+    if (!fast_) return;
+    std::lock_guard<std::mutex> lock(fast_->mu);
+    fast_->helper_refresh_usage = fast_->usage;
+}
+
 bool Glm5Model::refresh_stage_helper(std::string& err) {
     FastState* F = fast_;
     if (!stage_windows_enabled_ || !remote_front_ || !F || F->helper.device() < 0 || F->helper.integrated() ||
-        !F->net.empty() || F->stage_ram_canonical || stage_window_pending_ || stage_failed_ ||
+        !F->net.empty() || F->bg_hold || stage_window_pending_ || stage_failed_ ||
         remote_front_->pending() || remote_front_->streaming()) {
         err = "GLM stage refresh: needs an idle remote coordinator with a discrete local helper";
         return false;
     }
     cudaSetDevice(dev_);
-    if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "stage refresh sync", err) || !fast_boundary(err)) return false;
+    // No background promotion or prompt preload may read a RAM slot while its canonical owner changes.
+    F->bg_hold = true;
+    drop_preload_quiesce();
+    const bool drained = glmfast::cuda_ok(cudaStreamSynchronize(F->copy), "stage refresh copies", err) &&
+                         fast_boundary(err);
+    F->bg_hold = false;
+    if (!drained || !F->bg.empty() || !F->draining.empty()) {
+        if (drained) err = "GLM stage refresh: tier moves were not retired";
+        stage_failed_ = true; return false;
+    }
+    std::lock_guard<std::mutex> lock(F->mu);
     const auto start = std::chrono::steady_clock::now();
     const uint64_t before = F->helper_swaps;
-    if (!fast_helper_adapt(err, true, 256)) { stage_failed_ = true; return false; }
+    const char* limit = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_MAX");
+    const int max_swaps = limit ? std::max(0, std::min(256, std::atoi(limit))) : 128;
+    if (!fast_helper_adapt(err, true, max_swaps)) { stage_failed_ = true; return false; }
     std::fprintf(stderr, "glm stage helper refresh: %llu replacements after prefill, %.3f ms; "
                          "ownership fixed throughout decode\n", (unsigned long long) (F->helper_swaps - before),
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
@@ -2823,13 +2841,64 @@ bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_
         const auto& R = F->rc[(size_t) F->layer_rc[key / g_.n_expert]];
         if (R.st[(size_t) rs] != FastState::kRHold && R.st[(size_t) rs] != FastState::kRHelper) primary[key] = 0;
     }
-    const auto swaps = F->helper.swaps(F->cnt, primary, g_.n_expert, max_swaps);
+    // Batched prefill ages the global LFU counters once per 32768 expert rows. Early layers can thus
+    // become zero before the last layer finishes. Use per-key usage deltas for this explicit refresh,
+    // leaving decode's existing cache policy untouched. Counts include the previous answer and new prompt.
+    std::vector<uint32_t> recent;
+    if (stage_refresh) {
+        recent.resize(F->usage.size());
+        for (size_t k = 0; k < recent.size(); ++k) {
+            const uint32_t prev = k < F->helper_refresh_usage.size() ? F->helper_refresh_usage[k] : 0;
+            recent[k] = F->usage[k] >= prev ? F->usage[k] - prev : F->usage[k];
+        }
+        F->helper_refresh_usage = F->usage;
+    }
+    const char* wide_env = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_WIDE");
+    const bool wide = stage_refresh && wide_env && std::atoi(wide_env) != 0;
+    const auto swaps = F->helper.swaps(stage_refresh ? recent : F->cnt, primary, g_.n_expert, max_swaps, !wide);
     for (const auto& s : swaps) {
         if (!F->net_of.empty() && F->net_of[(size_t) s.in] != 0) continue;   // already on a net helper
         const int il = s.in / g_.n_expert;
         auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
         const int rs = F->ram_of[(size_t) s.in];
         const uint8_t* src = rs >= 0 ? R.base + (size_t) rs * R.stride : F->stage[0];
+        if (F->stage_ram_canonical) {
+            // SAME-layer exchange: incoming RAM blob -> helper; outgoing sole helper blob -> the same RAM slot.
+            // Keep both original blobs until the upload succeeds. No extra permanent RAM or SSD read is needed.
+            const size_t bytes = F->L[(size_t) il].blob;
+            if (!stage_refresh || s.out / g_.n_expert != il || rs < 0 || R.key[(size_t) rs] != s.in ||
+                R.st[(size_t) rs] != FastState::kRHold || F->ram_of[(size_t) s.out] >= 0 ||
+                F->slot_of[(size_t) s.in] >= 0 || F->slot_of[(size_t) s.out] >= 0 || bytes > F->stage_bytes) {
+                err = "GLM canonical helper exchange: unsettled or overlapping sources"; return false;
+            }
+            if (!F->helper.readback(s.out, F->stage[0], bytes, err)) return false;
+            if (const char* verify = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_VERIFY"); verify && std::atoi(verify)) {
+                std::vector<uint8_t> expected(bytes);
+                for (int role = 0; role < 3; ++role)
+                    fast_read_part(il, s.out % g_.n_expert, role, expected.data(), 0, 1);
+                if (std::memcmp(expected.data(), F->stage[0], bytes) != 0) {
+                    err = "GLM canonical helper exchange: outgoing blob differs from pack"; return false;
+                }
+            }
+            if (!F->helper.replace(s.out, s.in, src, err)) return false;
+            if (const char* verify = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_VERIFY"); verify && std::atoi(verify)) {
+                std::vector<uint8_t> uploaded(bytes);
+                if (!F->helper.readback(s.in, uploaded.data(), bytes, err)) return false;
+                if (std::memcmp(uploaded.data(), src, bytes) != 0) {
+                    err = "GLM canonical helper exchange: incoming blob differs from RAM"; return false;
+                }
+            }
+            std::memcpy(R.base + (size_t) rs * R.stride, F->stage[0], bytes);
+            R.key[(size_t) rs] = s.out; R.tick[(size_t) rs] = F->clock;
+            F->ram_of[(size_t) s.in] = -1; F->ram_of[(size_t) s.out] = rs;
+            const unsigned long long zero = 0, ptr = (unsigned long long) (R.base + (size_t) rs * R.stride);
+            if (!glmfast::cuda_ok(cudaMemcpy(F->tab + F->rtab_key(s.in), &zero, sizeof(zero), cudaMemcpyHostToDevice),
+                                 "canonical helper incoming RAM entry", err) ||
+                !glmfast::cuda_ok(cudaMemcpy(F->tab + F->rtab_key(s.out), &ptr, sizeof(ptr), cudaMemcpyHostToDevice),
+                                 "canonical helper outgoing RAM entry", err)) return false;
+            ++F->helper_swaps;
+            continue;
+        }
         if (rs < 0) for (int role = 0; role < 3; ++role) fast_read_part(il, s.in % g_.n_expert, role, F->stage[0], 0, 1);
         if (!F->helper.replace(s.out, s.in, src, err)) return false;
         if (F->helper.integrated()) {
@@ -2850,6 +2919,21 @@ bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_
             }
         }
         ++F->helper_swaps;
+    }
+    if (stage_refresh && F->stage_ram_canonical) {
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            for (int e = 0; e < g_.n_expert; ++e) {
+                const int key = il * g_.n_expert + e, rs = F->ram_of[(size_t) key];
+                const bool cpu_owned = !F->cpu_owned.empty() && F->cpu_owned[(size_t) key];
+                if (F->helper.owns(key) ? rs >= 0 :
+                    (rs < 0 || R.key[(size_t) rs] != key ||
+                     R.st[(size_t) rs] != (cpu_owned ? FastState::kRHelper : FastState::kRHold))) {
+                    err = "GLM canonical helper exchange: incomplete source coverage"; return false;
+                }
+            }
+        }
     }
     return swaps.empty() || glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(),
                          (size_t) F->n_keys, cudaMemcpyHostToDevice), "helper adapted ownership", err);
@@ -4891,6 +4975,14 @@ void Glm5Model::fast_prof_flush() {
                          (unsigned long long) n, F->stage_timing_front_ms[t] / n, F->stage_timing_tail_ms[t] / n);
             F->stage_timing_n[t] = 0;
             F->stage_timing_front_ms[t] = F->stage_timing_tail_ms[t] = 0;
+        }
+        for (size_t k = 0; k < F->stream_timing_n.size(); ++k) {
+            const auto n = F->stream_timing_n[k];
+            if (!n) continue;
+            std::fprintf(stderr, "glm stream timing: hit=%zu tokens=%llu front_wait_ms=%.6f tail_ms=%.6f\n", k,
+                         (unsigned long long) n, F->stream_timing_front_ms[k] / n, F->stream_timing_tail_ms[k] / n);
+            F->stream_timing_n[k] = 0;
+            F->stream_timing_front_ms[k] = F->stream_timing_tail_ms[k] = 0;
         }
         if (F->stage_cpu_batch) {
             const auto batches = F->fixed_cpu_batches.exchange(0);

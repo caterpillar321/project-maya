@@ -1874,7 +1874,10 @@ static int glm_pack_generate(const Options& o) {
     std::vector<int32_t> follow_ids;
     const char* follow_save = getenv("STRATA_GLM_SPEC_FOLLOW_SAVE");
     if (follow_save != nullptr && follow_save[0] == '\0') follow_save = nullptr;
-    if (const char* fp = getenv("STRATA_GLM_SPEC_FOLLOW"); fp != nullptr && fp[0] != '\0') {
+    const char* follow_path = getenv("STRATA_GLM_SPEC_FOLLOW");
+    const auto read_follow = [&]() -> bool {
+        const char* fp = follow_path;
+        if (!fp || !fp[0]) return true;
         std::ifstream input(fp);
         std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
         std::vector<int64_t> v;
@@ -1882,15 +1885,23 @@ static int glm_pack_generate(const Options& o) {
         if (!input && !input.eof()) e = "cannot read it";
         else if (!parse_i64_list(text.c_str(), v, e)) e = "not a list of token ids: " + e;
         for (const int64_t t : v)
-            if (e.empty() && t >= n_vocab) e = "token " + std::to_string(t) + " is past the vocabulary";
+            if (e.empty() && (t < 0 || t >= n_vocab)) e = "token " + std::to_string(t) + " is outside the vocabulary";
         if (!e.empty()) {
             std::fprintf(stderr, "maya generate: MAYA_GLM_SPEC_FOLLOW %s: %s\n", fp, e.c_str());
-            return 2;
+            return false;
         }
         follow_ids.assign(v.begin(), v.end());
         std::fprintf(stderr, "glm follow: every request decodes the %zu tokens of %s (MAYA_GLM_SPEC_FOLLOW)\n",
                      follow_ids.size(), fp);
-    }
+        return true;
+    };
+    if (!read_follow()) return 2;
+    const char* reload_env = getenv("STRATA_GLM_SPEC_FOLLOW_RELOAD");
+    const bool follow_reload = reload_env && std::strcmp(reload_env, "1") == 0;
+    const char* refresh_env = getenv("STRATA_GLM_STAGE_HELPER_REFRESH");
+    const bool helper_refresh = refresh_env && std::strcmp(refresh_env, "1") == 0;
+    const char* after_env = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_AFTER");
+    const bool helper_after = after_env && std::strcmp(after_env, "1") == 0;
     const auto run_request = [&](const std::vector<int64_t>& ids, int64_t max_new,
                                  const strata::kernels::SamplerParams& rq_in) -> int {
         strata::kernels::SamplerParams sp = rq_in;   // per request (the server sends sampling keys per GEN)
@@ -1898,6 +1909,8 @@ static int glm_pack_generate(const Options& o) {
         pause_req.store(false);
         pause_keep.store(false);
         model.force_next(-1);
+        // Benchmarks atomically replace this file before each request to replay a captured agent trajectory.
+        if (follow_reload && !read_follow()) { std::printf("ERR invalid replay continuation\n"); return 1; }
         model.set_follow(follow_ids);   // STRATA_GLM_SPEC_FOLLOW: this request's tokens (empty: its own picks)
         if (!follow_ids.empty()) max_new = std::min<int64_t>(max_new, (int64_t) follow_ids.size());
         bool in_think = req_think_budget > 0 && req_think_end >= 0;
@@ -1924,8 +1937,8 @@ static int glm_pack_generate(const Options& o) {
         const char* finish = "length";
         auto t0 = std::chrono::steady_clock::now();
         if (prep_prompt(prompt, reuse, finish, t0) != 0) return 1;
-        if (const char* refresh = getenv("STRATA_GLM_STAGE_HELPER_REFRESH");
-            refresh && std::strcmp(refresh, "1") == 0 && !stop_req.load()) {
+        if (helper_refresh && helper_after) model.observe_stage_helper_usage();
+        if (helper_refresh && !helper_after && !stop_req.load()) {
             if (!model.refresh_stage_helper(err)) {
                 std::fprintf(stderr, "stage helper refresh: %s\n", err.c_str());
                 std::printf("ERR stage helper refresh failed\n");
@@ -2197,6 +2210,16 @@ static int glm_pack_generate(const Options& o) {
             else
                 std::fprintf(stderr, "glm follow: %zu decoded ids written to %s (MAYA_GLM_SPEC_FOLLOW_SAVE)\n",
                              emitted.size(), follow_save);
+        }
+        // DONE was flushed above. Replanning may overlap the client's tool work; it never changes ownership
+        // inside a decode. Very short answers provide too little evidence to justify moving expert blobs.
+        // The HTTP adapter may send a late STOP while draining an already completed answer. Judge cancellation
+        // from this request's recorded finish reason, not that acknowledgement's still-set atomic flag.
+        if (helper_refresh && helper_after && produced >= 128 && std::strcmp(finish, "cancel") != 0 && !pause_req.load()) {
+            if (!model.refresh_stage_helper(err)) {
+                std::fprintf(stderr, "stage helper refresh after response: %s\n", err.c_str());
+                return 1;
+            }
         }
         return 0;
     };

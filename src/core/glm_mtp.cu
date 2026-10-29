@@ -557,6 +557,8 @@ bool Glm5Model::decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t
     int32_t previous_guess = -1;
     uint64_t steps = 0, candidates = 0, hits = 0;
     double draft_ms = 0, apply_ms = 0;
+    const char* couple_env = getenv("STRATA_GLM_REMOTE_SAMPLE_GUESS");
+    const bool coupled = couple_env && std::strcmp(couple_env, "1") == 0 && !sp.greedy && sp.temperature > 0;
     bool ok = true;
     while (produced < max_new && pos_ + 1 < max_ctx_) {
         const int64_t p0 = pos_;
@@ -565,9 +567,20 @@ bool Glm5Model::decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t
         if (produced + 1 < max_new && p0 > 0 && mtp_hx_pos_ == p0 - 1) {
             // A fresh one-step NextN prediction from the TRUE previous trunk state. Its cache row is
             // therefore already canonical; no recursive guessed hidden state enters later drafting.
-            const bool sub = F->mtp_dv > 0 && mtp_out_ < 0.02;
-            if (!fast_mtp(p0 - 1, y, err, 0, sub, true) ||
-                !glmfast::wait_event(F->ev_mtp, "remote pipeline draft", err) || !F->route_ok(err)) {
+            const bool sub = !coupled && F->mtp_dv > 0 && mtp_out_ < 0.02;
+            if (!fast_mtp(p0 - 1, y, err, 0, sub, !coupled)) { ok = false; break; }
+            if (coupled) {
+                // Guess with the target's next counter/filters/history. Philox is stateless: this does not
+                // consume the target's draw or change its distribution. Only an exact target-token match
+                // reuses the worker's tentative prefix, just as for the argmax guess.
+                pick_tokens(F->mtp_logits, 1, sp, nullptr, 0, F->mtp_tok, F->cs);
+                if (!glmfast::cuda_ok(cudaMemcpyAsync(F->mtp_tok_h, F->mtp_tok, sizeof(int),
+                                                      cudaMemcpyDeviceToHost, F->cs), "coupled draft token", err) ||
+                    !glmfast::cuda_ok(cudaEventRecord(F->ev_mtp, F->cs), "coupled draft completion", err)) {
+                    ok = false; break;
+                }
+            }
+            if (!glmfast::wait_event(F->ev_mtp, "remote pipeline draft", err) || !F->route_ok(err)) {
                 ok = false; break;
             }
             next_guess = F->mtp_tok_h[0];
@@ -595,9 +608,10 @@ bool Glm5Model::decode_remote_stream(strata::kernels::SamplerParams& sp, int64_t
         stage_failed_ = true; remote_front_->close();
     }
     if (steps) std::fprintf(stderr, "glm remote pipeline: %llu steps, %llu/%llu front guesses reused; "
-                                   "draft %.3f ms/step, front wait + tail %.3f ms/step\n",
+                                   "draft %.3f ms/step, front wait + tail %.3f ms/step, coupled=%d\n",
                             (unsigned long long) steps, (unsigned long long) hits, (unsigned long long) candidates,
-                            draft_ms / steps, apply_ms / steps);
+                            draft_ms / steps, apply_ms / steps, coupled);
+    win_prof_report(); // T1 stream windows need the same bounded timeline/host report as the T2/T3 verifier.
     return ok;
 }
 
