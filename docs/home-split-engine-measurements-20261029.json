@@ -1,0 +1,480 @@
+{
+  "schema": 1,
+  "date": "2026-10-29",
+  "source_commit": "26497c1",
+  "experiments": [
+    {
+      "artifact_directory": "/home/caterpillar/Agent/maya-split-net-20261029",
+      "phase": "complete-development-kept",
+      "arms": {
+        "split-plain": {
+          "speeds": {
+            "chat": 13.2,
+            "code": 11.1
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "538840fdb6adc7fe0add06ba52d6b7c6"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 290.8259927390621,
+              "remote_helper_pct_one_core": 84.69986662561165,
+              "harness_wall_seconds": 165.8208042060014
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,18) expert pool 17.45 GB, 77-102 slots/layer (1363 total)",
+            "glm fast: CUDA0 layers [18,45) expert pool 22.62 GB, 48-88 slots/layer, the draft layer 64 (1813 total)",
+            "glm fast: CUDA1 RAM tier 32.08 GB pinned, 2504 slots",
+            "glm fast: CUDA0 RAM tier 59.92 GB pinned, 4802 slots",
+            "glm net helper: listen:18800 owns 1112 more experts in 14.91 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1711,
+              "expected_routes": 25665,
+              "observed_routes": 25665,
+              "trunk_routes": 25665,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 20951,
+              "boundary_d2h_bytes": 280608112640,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 62,
+              "background_h2d_bytes": 910163968,
+              "ram_fetch_count": 34563,
+              "ram_fetch_bytes": 462697267200,
+              "disk_miss_count": 2045,
+              "disk_miss_bytes": 27355774976,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 490053042176
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 46197,
+              "observed_routes": 46197,
+              "trunk_routes": 46197,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 41003,
+              "boundary_d2h_bytes": 548183212032,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 29,
+              "background_h2d_bytes": 387710976,
+              "ram_fetch_count": 64316,
+              "ram_fetch_bytes": 859862728704,
+              "disk_miss_count": 923,
+              "disk_miss_bytes": 12339904512,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 872202633216
+            }
+          }
+        },
+        "split-pipe": {
+          "speeds": {
+            "chat": 15.1,
+            "code": 13.2
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "538840fdb6adc7fe0add06ba52d6b7c6"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 288.75092587890396,
+              "remote_helper_pct_one_core": 113.66825377331772,
+              "harness_wall_seconds": 145.40559436200056
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,18) expert pool 17.45 GB, 77-102 slots/layer (1363 total)",
+            "glm fast: CUDA0 layers [18,45) expert pool 22.62 GB, 48-88 slots/layer, the draft layer 64 (1813 total)",
+            "glm fast: CUDA1 RAM tier 32.08 GB pinned, 2504 slots",
+            "glm fast: CUDA0 RAM tier 59.92 GB pinned, 4802 slots",
+            "glm net helper: listen:18800 owns 1112 more experts in 14.91 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1920,
+              "expected_routes": 28800,
+              "observed_routes": 28800,
+              "trunk_routes": 28800,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 23214,
+              "boundary_d2h_bytes": 310911434752,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 61,
+              "background_h2d_bytes": 895483904,
+              "ram_fetch_count": 37918,
+              "ram_fetch_bytes": 507600961536,
+              "disk_miss_count": 2207,
+              "disk_miss_bytes": 29519773696,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 537120735232
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 47908,
+              "observed_routes": 47908,
+              "trunk_routes": 46197,
+              "draft_routes": 1711,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 41781,
+              "boundary_d2h_bytes": 559156297728,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 29,
+              "background_h2d_bytes": 387710976,
+              "ram_fetch_count": 65080,
+              "ram_fetch_bytes": 870651002880,
+              "disk_miss_count": 917,
+              "disk_miss_bytes": 12264407040,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 882915409920
+            }
+          }
+        }
+      },
+      "warnings": [],
+      "initial_allocations_equal": true,
+      "greedy_equal": true
+    },
+    {
+      "artifact_directory": "/home/caterpillar/Agent/maya-split-net-copy-20261029",
+      "phase": "complete-development-kept",
+      "arms": {
+        "resident-plain": {
+          "speeds": {
+            "chat": 33.9,
+            "code": 29.9
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "ff5dab533fbb60b18e34d33b05d58176"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 262.35551385253274,
+              "remote_helper_pct_one_core": 505.1445975753068,
+              "harness_wall_seconds": 61.68728746100169
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,11) expert pool 18.79 GB, 156-207 slots/layer (1429 total)",
+            "glm fast: CUDA0 layers [11,45) expert pool 21.29 GB, 44-64 slots/layer, the draft layer 48 (1707 total)",
+            "glm fast: CUDA1 RAM tier 17.09 GB pinned, 1305 slots",
+            "glm fast: CUDA0 RAM tier 74.91 GB pinned, 6006 slots",
+            "glm net helper: listen:18800 owns 899 more experts in 11.76 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1711,
+              "expected_routes": 13688,
+              "observed_routes": 13688,
+              "trunk_routes": 13688,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 24,
+              "boundary_d2h_bytes": 352321536,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 62,
+              "background_h2d_bytes": 910163968,
+              "ram_fetch_count": 22,
+              "ram_fetch_bytes": 322961408,
+              "disk_miss_count": 1,
+              "disk_miss_bytes": 14680064,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 337641472
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 58174,
+              "observed_routes": 58174,
+              "trunk_routes": 58174,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 58591,
+              "boundary_d2h_bytes": 783323234304,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 25,
+              "background_h2d_bytes": 334233600,
+              "ram_fetch_count": 76912,
+              "ram_fetch_bytes": 1028262985728,
+              "disk_miss_count": 1802,
+              "disk_miss_bytes": 24091557888,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 1052354543616
+            }
+          }
+        },
+        "resident-pipe": {
+          "speeds": {
+            "chat": 38.4,
+            "code": 32.9
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "28fd90c185aced7dcf79c674ca23a0ae"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 258.1409443296989,
+              "remote_helper_pct_one_core": 506.3781432882988,
+              "harness_wall_seconds": 55.93843331400058
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,11) expert pool 18.79 GB, 156-207 slots/layer (1429 total)",
+            "glm fast: CUDA0 layers [11,45) expert pool 21.29 GB, 44-64 slots/layer, the draft layer 48 (1707 total)",
+            "glm fast: CUDA1 RAM tier 17.09 GB pinned, 1305 slots",
+            "glm fast: CUDA0 RAM tier 74.91 GB pinned, 6006 slots",
+            "glm net helper: listen:18800 owns 899 more experts in 11.76 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1925,
+              "expected_routes": 15400,
+              "observed_routes": 15400,
+              "trunk_routes": 15400,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 26,
+              "boundary_d2h_bytes": 381681664,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 60,
+              "background_h2d_bytes": 880803840,
+              "ram_fetch_count": 25,
+              "ram_fetch_bytes": 367001600,
+              "disk_miss_count": 0,
+              "disk_miss_bytes": 0,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 367001600
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 59885,
+              "observed_routes": 59885,
+              "trunk_routes": 58174,
+              "draft_routes": 1711,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 58232,
+              "boundary_d2h_bytes": 779208622080,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 25,
+              "background_h2d_bytes": 334233600,
+              "ram_fetch_count": 75393,
+              "ram_fetch_bytes": 1008650158080,
+              "disk_miss_count": 1771,
+              "disk_miss_bytes": 23682613248,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 1032332771328
+            }
+          }
+        }
+      },
+      "warnings": [],
+      "initial_allocations_equal": true,
+      "greedy_equal": false
+    },
+    {
+      "artifact_directory": "/home/caterpillar/Agent/maya-split-net-cpu-20261029",
+      "phase": "complete-development-kept",
+      "arms": {
+        "cpu-front-plain": {
+          "speeds": {
+            "chat": 25.3,
+            "code": 23.0
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "838b887bd6e3b4518dbff6a15c98dfc3"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 695.2964700172432,
+              "remote_helper_pct_one_core": 172.5377168613305,
+              "harness_wall_seconds": 81.23441213299884
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,18) expert pool 17.45 GB, 77-102 slots/layer (1363 total)",
+            "glm fast: CUDA0 layers [18,45) expert pool 22.62 GB, 48-88 slots/layer, the draft layer 64 (1813 total)",
+            "glm fast: CUDA1 RAM tier 32.08 GB pinned, 2504 slots",
+            "glm fast: CUDA0 RAM tier 59.92 GB pinned, 4802 slots",
+            "glm net helper: listen:18800 owns 1112 more experts in 14.91 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1711,
+              "expected_routes": 25665,
+              "observed_routes": 25665,
+              "trunk_routes": 25665,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 1567,
+              "boundary_d2h_bytes": 20949762048,
+              "background_d2h_count": 2008,
+              "background_d2h_bytes": 26861109248,
+              "background_h2d_count": 2079,
+              "background_h2d_bytes": 27888451584,
+              "ram_fetch_count": 0,
+              "ram_fetch_bytes": 0,
+              "disk_miss_count": 1582,
+              "disk_miss_bytes": 21150302208,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 21150302208
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 46197,
+              "observed_routes": 46197,
+              "trunk_routes": 46197,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 40775,
+              "boundary_d2h_bytes": 545135001600,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 31,
+              "background_h2d_bytes": 414449664,
+              "ram_fetch_count": 63029,
+              "ram_fetch_bytes": 842656382976,
+              "disk_miss_count": 958,
+              "disk_miss_bytes": 12807831552,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 855464214528
+            }
+          }
+        },
+        "cpu-front-pipe": {
+          "speeds": {
+            "chat": 35.7,
+            "code": 30.7
+          },
+          "requests": 9,
+          "audit_complete": true,
+          "greedy_md5": [
+            "838b887bd6e3b4518dbff6a15c98dfc3"
+          ],
+          "cpu": [
+            {
+              "main_engine_pct_one_core": 753.8441667194403,
+              "remote_helper_pct_one_core": 266.0513064420519,
+              "harness_wall_seconds": 62.2436334610029
+            }
+          ],
+          "startup_allocations": [
+            "glm fast: CUDA1 layers [0,18) expert pool 17.45 GB, 77-102 slots/layer (1363 total)",
+            "glm fast: CUDA0 layers [18,45) expert pool 22.62 GB, 48-88 slots/layer, the draft layer 64 (1813 total)",
+            "glm fast: CUDA1 RAM tier 32.08 GB pinned, 2504 slots",
+            "glm fast: CUDA0 RAM tier 59.92 GB pinned, 4802 slots",
+            "glm net helper: listen:18800 owns 1112 more experts in 14.91 GiB (read from its own pack copy)",
+            "glm net helper: listen:18801 owns 1198 more experts in 14.92 GiB (read from its own pack copy)"
+          ],
+          "tier_by_device": {
+            "1": {
+              "boundaries": 1895,
+              "expected_routes": 28425,
+              "observed_routes": 28425,
+              "trunk_routes": 28425,
+              "draft_routes": 0,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 1620,
+              "boundary_d2h_bytes": 21658337280,
+              "background_d2h_count": 2128,
+              "background_d2h_bytes": 28469886976,
+              "background_h2d_count": 2209,
+              "background_h2d_bytes": 29630922752,
+              "ram_fetch_count": 0,
+              "ram_fetch_bytes": 0,
+              "disk_miss_count": 1632,
+              "disk_miss_bytes": 21818769408,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 21818769408
+            },
+            "0": {
+              "boundaries": 1711,
+              "expected_routes": 47908,
+              "observed_routes": 47908,
+              "trunk_routes": 46197,
+              "draft_routes": 1711,
+              "metadata_missing": 0,
+              "service_pending": 0,
+              "boundary_d2h_count": 41911,
+              "boundary_d2h_bytes": 560919478272,
+              "background_d2h_count": 0,
+              "background_d2h_bytes": 0,
+              "background_h2d_count": 30,
+              "background_h2d_bytes": 401080320,
+              "ram_fetch_count": 65493,
+              "ram_fetch_bytes": 876201639936,
+              "disk_miss_count": 989,
+              "disk_miss_bytes": 13224640512,
+              "prefetch_count": 0,
+              "prefetch_bytes": 0,
+              "mapped_fetch_and_miss_bytes": 889426280448
+            }
+          }
+        }
+      },
+      "warnings": [],
+      "initial_allocations_equal": true,
+      "greedy_equal": true
+    }
+  ],
+  "total_requests_including_first_milestone": 81,
+  "quantization": "IQ4_XS unchanged, INT8 KV unchanged",
+  "restoration": "Explicitly disabled by user; retain development engine.",
+  "active_config": "/home/caterpillar/fn/codex-split-net-cpu-20261029/cpu-front-pipe.json",
+  "active_binary_sha256": "8a368792a86427d9ddcb5a9ff446d80b12dfec76f99857695851f54a8886bc69",
+  "limitations": [
+    "One qshort pass per arm; speeds are not long-run averages.",
+    "Last qshort greedy hash is after eight sampled requests; its cache history is not a controlled fresh-first-request parity test.",
+    "Different greedy hashes for resident-copy plain/pipe remain unresolved; neither a verified state bug nor proven harmless rounding.",
+    "Per-device startup allocations compared; helper CPU-versus-GPU arithmetic can change as cache residency changes.",
+    "Logical disk-miss payload counters are not physical SSD traffic measurements.",
+    "Current two-stage path uses continuous decode_spec, not native batched split MTP.",
+    "No result reaches 50 tok/s; the prior single-trunk MTP baseline remains faster."
+  ]
+}

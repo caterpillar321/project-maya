@@ -1,5 +1,8 @@
 # 50 tok/s 엔진 개발
 
+최신 구현·측정·실행 상태는 [재개 문서](home-engine-development-20261029.md)에 있습니다.
+아래의 초기 구조와 개발 순서는 개발 시작 시점의 기준입니다.
+
 2026-10-29. 기존 포크 `caterpillar321/project-maya`의 검증된 `bbe5f1c`에서
 `codex/engine-50tps`를 분기했습니다. 운영 소스와 별도 worktree에서 개발합니다.
 
