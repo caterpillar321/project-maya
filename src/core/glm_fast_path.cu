@@ -20,6 +20,7 @@
 #include "strata/core/net_copy_profile.hpp"
 #include "strata/core/expert_slot_profile.hpp"
 #include "strata/core/glm_model.hpp"
+#include "strata/core/glm_split_net_plan.hpp"
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/kernels/copy_lane_policy.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -1615,7 +1616,8 @@ bool Glm5Model::fast_setup(std::string& err) {
         // the whole machine's budget is measured ONCE (the first half's pinning would shrink what the second
         // half sees): MemAvailable minus headroom for the OS, the server and the page cache the disk reads go
         // through; STRATA_GLM_RAM_GB pins it.  Each half takes its share of the MoE layers still unserved,
-        // and whatever a half cannot use (its experts already fit) passes on to the next half.
+        // and whatever a half cannot use (its experts already fit) passes on to the next half. SPLIT_NET uses this
+        // same machine-wide budget; it must not reinterpret STRATA_GLM_RAM_GB as a separate allowance per endpoint.
         // The later parts' prompt path pins after this measurement (their token rows and landing ring, and the rows a
         // middle part hands on), and that came out of the headroom: one part's staging fits in it (two GPUs: 2x V100,
         // as v1.0.30), three parts' did not and froze a Linux desktop (#77).  What a third part on adds is set aside
@@ -2078,8 +2080,10 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
     }
     const char* local_helper = getenv("STRATA_GLM_EXPERT_HELPER");
     const char* net_helper = getenv("STRATA_GLM_NET_HELPER");
+    const char* split_helper = getenv("STRATA_GLM_SPLIT_NET");
     if ((local_helper != nullptr && local_helper[0] != '\0') ||
-        (net_helper != nullptr && net_helper[0] != '\0'))
+        (net_helper != nullptr && net_helper[0] != '\0') ||
+        (split_helper != nullptr && std::strcmp(split_helper, "1") == 0))
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
     glmfast::pin_thread(F->svc.native_handle(), F->cpu_pin);   // (the CPU lane's last worker: on its pool's node)
@@ -2089,12 +2093,25 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
 // ---------------------------------------------------------------- the CPU lane
 bool Glm5Model::fast_helper_setup(std::string& err) {
     FastState* F = fast_;
-    if (n_parts_ != 1 || exl3_ || g_.n_embd > 4096 || g_.n_exp_used > 8) {
-        err = "GLM expert helper: use one trunk GPU and native GGUF experts (up to 8 per route)";
+    GlmSplitNetPlan split_net;
+    // The derived boundary covers --layer-split when STRATA_GLM_SPLIT was not set. Revalidate the same pure plan
+    // used before load, then verify this part's actual device/range before opening any helper session.
+    const std::string boundary = n_parts_ == 2 ? std::to_string(part_ == 0 ? l1_ : l0_) : std::string();
+    if (!read_glm_split_net_plan(boundary, g_.n_layers, split_net, err)) return false;
+    if (split_net.enabled &&
+        (n_parts_ != 2 || part_ < 0 || part_ > 1 || split_devs_.size() != 2 ||
+         split_devs_[0] != split_net.devices[0] || split_devs_[1] != split_net.devices[1] ||
+         dev_ != split_net.devices[(size_t) part_] || l0_ != (part_ == 0 ? 0 : split_net.boundary) ||
+         l1_ != (part_ == 0 ? split_net.boundary : g_.n_layers))) {
+        err = "GLM split net: loaded part does not match the validated two-trunk plan";
         return false;
     }
-    // Network expert supply is independent of a local helper GPU. Keep one trunk until a shared network-session
-    // coordinator can route requests from several parts; helperd currently serves only one session at a time.
+    if ((n_parts_ != 1 && !split_net.enabled) || exl3_ || g_.n_embd > 4096 || g_.n_exp_used > 8) {
+        err = "GLM expert helper: use one trunk or the explicit SPLIT_NET plan, with native GGUF experts (up to 8 per route)";
+        return false;
+    }
+    // Network expert supply is independent of a local helper GPU. The experimental split assigns distinct sessions
+    // to its parts; sharing an endpoint still needs a coordinator because helperd serves one session at a time.
     const char* local = getenv("STRATA_GLM_EXPERT_HELPER");
     const bool have_local = local != nullptr && local[0] != '\0';
     const int device = have_local ? std::atoi(local) : -1;
@@ -2134,7 +2151,10 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         if (F->helper.integrated()) R.st[(size_t) rs] = FastState::kRHelper;
         ++resident;
     }
-    if (const char* nh = getenv("STRATA_GLM_NET_HELPER"); nh != nullptr && nh[0] != '\0') {
+    const char* global_net = getenv("STRATA_GLM_NET_HELPER");
+    const std::string net_spec = split_net.enabled ? split_net.endpoints[(size_t) part_]
+                                                  : global_net != nullptr ? global_net : "";
+    if (!net_spec.empty()) {
         if (have_local && F->helper.integrated()) {
             err = "GLM net helper: needs a discrete local helper GPU";
             return false;
@@ -2142,7 +2162,7 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         std::vector<std::string> shards;
         for (const auto& s : pack_shards_) shards.push_back(s.path);
         F->net_of.assign((size_t) F->n_keys, 0);
-        const std::string spec = nh;
+        const std::string& spec = net_spec;
         for (size_t at = 0; at < spec.size();) {
             const size_t comma = spec.find(',', at);
             const std::string hp = spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
@@ -2563,6 +2583,11 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
                              "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n",
                      device, resident, (double) F->helper.used() / 1073741824.0,
                      F->helper.integrated() ? "mapped RAM (no extra weight copy)" : "VRAM (auto, 512 MiB headroom)", dev_);
+    } else if (split_net.enabled) {
+        const char* role = l1_ == g_.n_layers
+            ? (mtp_il_ >= 0 ? "output head and NextN on this part" : "output head on this part") : "front trunk part";
+        std::fprintf(stderr, "glm split net: CUDA%d layers [%d,%d) endpoint %s; %s\n", dev_, l0_, l1_,
+                     net_spec.c_str(), role);
     } else {
         std::fprintf(stderr, "glm helper: %zu network helpers without a local helper GPU; "
                              "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n", F->net.size(), dev_);
@@ -7584,6 +7609,9 @@ int Glm5Model::mtp_draft(int32_t next_tok, std::string& err) {
 // tokens only - so the output is exactly what the token-at-a-time decode would produce for the same samples.
 bool Glm5Model::spec_ready() const {
     if (fast_ == nullptr || split_next_ == nullptr || getenv("STRATA_GLM_NO_SPEC") != nullptr) return false;
+    // Runtime-only A/B switch: unlike NO_SPEC, this does not change NextN loading or KDA backup/pool sizing.
+    // Keep it out of every allocation path so plain and pipelined decode can use the same initial placement.
+    if (const char* s = getenv("STRATA_GLM_SPEC_DECODE"); s != nullptr && std::strcmp(s, "0") == 0) return false;
     const Glm5Model* last = this;
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr) return false;

@@ -17,6 +17,7 @@
 // lands), so a batched call is literally the same per-token steps as single-token calls - which
 // is what glm_model_test's batched-vs-streamed equivalence pins.
 #include "glm_fast_state.hpp"
+#include "strata/core/glm_split_net_plan.hpp"
 
 #include "strata/kernels/glm_dsa.hpp"
 #include "strata/kernels/glm_fast.hpp"
@@ -1951,6 +1952,27 @@ bool Glm5Model::load_pack_env(const std::string& pack_dir, int64_t max_ctx, std:
 
 bool Glm5Model::load_pack_place(const std::string& pack_dir, int64_t max_ctx, std::string& err,
                                 const std::string& layer_split) {
+    GlmSplitNetPlan split_net;
+    if (!read_glm_split_net_plan(layer_split, g_.n_layers, split_net, err)) return false;
+    if (split_net.enabled) {
+        // Validate every endpoint and unsupported option before either part allocates model memory or opens a
+        // session. Each part owns its endpoint exclusively; no helperd protocol or multi-session assumption changes.
+        int devices = 0;
+        if (cudaGetDeviceCount(&devices) != cudaSuccess) {
+            cudaGetLastError();
+            err = "GLM split net: cannot enumerate CUDA devices";
+            return false;
+        }
+        for (int d : split_net.devices) if (d >= devices) {
+            err = "GLM split net: physical CUDA" + std::to_string(d) + " is not visible";
+            return false;
+        }
+        std::fprintf(stderr, "glm split net: experimental two-trunk plan, boundary %d, CUDA%d -> CUDA%d; "
+                             "exclusive helper sessions, native window MTP unchanged\n",
+                     split_net.boundary, split_net.devices[0], split_net.devices[1]);
+        return load_pack_split(pack_dir, max_ctx, {split_net.boundary},
+                               {split_net.devices[0], split_net.devices[1]}, err);
+    }
     // the layer split is the DEFAULT on multi-GPU hosts (measured at steady state, 640-token GEN on
     // real text: 182 vs 840 MB/tok device bytes, decode 195 vs 506 ms/tok, hit 87-90 vs 64.4% - the
     // pools are per-part, so 2x capacity halves the demand reads).  STRATA_GLM_SPLIT=0 forces one

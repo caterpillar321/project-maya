@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "date": "2026-10-29",
+  "source_commit": "9805d3e",
+  "binary_sha256": "c4827895b5b49a95aa9096f155ca5893f00fd5791dd0ad1d54f3a8b5f8de823b",
+  "scope": "Single-trunk net-only wiring and sampled trace; not split-MTP completion or 50 tok/s achievement.",
+  "test_requests": 27,
+  "original_qshort_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+  "metrics": {
+    "trace-off": {
+      "audit_complete": true,
+      "requests": 9,
+      "speed": {
+        "chat": {
+          "pass_tok_s": [
+            39.4
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 39.4
+        },
+        "code": {
+          "pass_tok_s": [
+            34.7
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 34.7
+        }
+      },
+      "greedy_md5": [
+        "3dc5a157144ded2796f76eec5bf6051f"
+      ]
+    },
+    "trace-on": {
+      "audit_complete": true,
+      "requests": 9,
+      "speed": {
+        "chat": {
+          "pass_tok_s": [
+            39.2
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 39.2
+        },
+        "code": {
+          "pass_tok_s": [
+            34.5
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 34.5
+        }
+      },
+      "greedy_md5": [
+        "3dc5a157144ded2796f76eec5bf6051f"
+      ]
+    },
+    "net-only": {
+      "audit_complete": true,
+      "requests": 9,
+      "speed": {
+        "chat": {
+          "pass_tok_s": [
+            31.5
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 31.5
+        },
+        "code": {
+          "pass_tok_s": [
+            27.0
+          ],
+          "arithmetic_mean_of_reported_pass_tok_s": 27.0
+        }
+      },
+      "greedy_md5": [
+        "bde9193a1a03c9647115830774e85fa6"
+      ]
+    }
+  },
+  "trace_off_on_counter_differences": [],
+  "trace_groups": {
+    "chat": {
+      "sampled_windows": 28,
+      "mean_span_ms": 49.884678642857146,
+      "stages_mean_ms": {
+        "capture": 0.08716342857142877,
+        "dense_ffn": 0.4551965714285714,
+        "dsa_attn": 0.8024674285714285,
+        "dsa_out_mv": 0.8981657142857145,
+        "dsa_prep": 0.12863314285714292,
+        "dsa_proj_mv": 0.4328114285714286,
+        "dsa_q_mv": 0.38234857142857137,
+        "embedding": 0.025826285714285715,
+        "final_hc": 0.004089142857142856,
+        "hc": 1.9221234285714297,
+        "head_and_pick": 0.5273771428571429,
+        "kda_out_mv": 1.499877714285717,
+        "kda_proj_mv": 3.428060571428572,
+        "kda_tokens": 0.9087668571428578,
+        "moe_experts": 4.159149714285714,
+        "moe_fetch_disk_rows": 2.489346285714283,
+        "moe_fetch_ram_rows": 18.338456000000015,
+        "moe_helper_join": 7.7048171428571335,
+        "moe_route": 2.156258285714284,
+        "moe_route_wait": 1.8887222857142802,
+        "moe_router_shared_up": 1.6440879999999953,
+        "result_copy": 0.0009337142857142858
+      }
+    },
+    "code": {
+      "sampled_windows": 28,
+      "mean_span_ms": 56.03640357142857,
+      "stages_mean_ms": {
+        "capture": 0.09472000000000025,
+        "dense_ffn": 0.454736,
+        "dsa_attn": 0.8026457142857145,
+        "dsa_out_mv": 0.9073668571428575,
+        "dsa_prep": 0.1346354285714286,
+        "dsa_proj_mv": 0.43538057142857145,
+        "dsa_q_mv": 0.38999657142857147,
+        "embedding": 0.027236571428571422,
+        "final_hc": 0.004098285714285714,
+        "hc": 1.945764571428572,
+        "head_and_pick": 0.5271245714285714,
+        "kda_out_mv": 1.5237725714285733,
+        "kda_proj_mv": 3.4577291428571444,
+        "kda_tokens": 0.9170171428571431,
+        "moe_experts": 3.8749234285714285,
+        "moe_fetch_disk_rows": 2.1433794285714307,
+        "moe_fetch_ram_rows": 25.428852571428575,
+        "moe_helper_join": 8.601372571428561,
+        "moe_route": 2.2597702857142847,
+        "moe_route_wait": 0.45779657142857116,
+        "moe_router_shared_up": 1.6471531428571384,
+        "result_copy": 0.0009314285714285714
+      }
+    },
+    "greedy": {
+      "sampled_windows": 4,
+      "mean_span_ms": 54.29176825,
+      "stages_mean_ms": {
+        "capture": 0.09160800000000005,
+        "dense_ffn": 0.45650399999999997,
+        "dsa_attn": 0.807664,
+        "dsa_out_mv": 0.9117920000000003,
+        "dsa_prep": 0.13913599999999995,
+        "dsa_proj_mv": 0.4393360000000001,
+        "dsa_q_mv": 0.3931279999999999,
+        "embedding": 0.024728,
+        "final_hc": 0.004096,
+        "hc": 1.9568479999999981,
+        "head_and_pick": 0.45972,
+        "kda_out_mv": 1.525448000000002,
+        "kda_proj_mv": 3.4547520000000014,
+        "kda_tokens": 0.9216399999999996,
+        "moe_experts": 4.013552000000002,
+        "moe_fetch_disk_rows": 1.528207999999999,
+        "moe_fetch_ram_rows": 25.880752000000015,
+        "moe_helper_join": 6.8528959999999985,
+        "moe_route": 2.2908959999999983,
+        "moe_route_wait": 0.48097600000000085,
+        "moe_router_shared_up": 1.6571519999999975,
+        "result_copy": 0.000936
+      }
+    }
+  },
+  "limitations": [
+    "One qshort pass per arm; not long-run performance averages.",
+    "Net-only changes expert placement and greedy hash; it passed functional completion, not output parity.",
+    "Trace intervals are sampled and include launch/submission/wait costs; not isolated transfer time.",
+    "User requested no production reload; final successful development server retained."
+  ]
+}
