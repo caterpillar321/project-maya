@@ -42,10 +42,19 @@ int main(int argc, char** argv) {
     require(model.load_pack_env(argv[1], context, err), err);
     require(model.remote_front_enabled() && model.mtp_ready(), "remote native MTP must be active");
     const size_t V = model.geometry().n_vocab;
+    const bool refresh = std::getenv("STRATA_GLM_STAGE_HELPER_REFRESH") != nullptr;
     // Forced valid token IDs isolate state/geometry from tokenizer and sampling changes. The speed harness is separate.
     std::vector<int32_t> tokens;
     for (int i = 0; i < 40; ++i) tokens.push_back(1000 + (i * 137) % 7000);
     std::vector<std::vector<float>> reference;
+    if (refresh) {
+        std::vector<float> warm;
+        require(model.forward(tokens, warm, err), err);
+        const auto position = model.position();
+        require(model.refresh_stage_helper(err), err);
+        require(model.position() == position, "helper refresh leaves position unchanged");
+        model.reset();
+    }
     for (int32_t t : tokens) {
         std::vector<float> logits;
         require(model.forward({t}, logits, err), err);
@@ -62,6 +71,10 @@ int main(int argc, char** argv) {
         if (prefix) require(model.forward(std::vector<int32_t>(tokens.begin(), tokens.begin()+prefix), logits, err), err);
         std::vector<int32_t> out((size_t) T);
         require(model.window(tokens.data()+prefix, T, out.data(), err), err);
+        if (refresh) {
+            require(!model.refresh_stage_helper(err), "refresh refuses a pending verification window");
+            err.clear();
+        }
         require(model.window_logits(logits, err), err);
         for (int row = 0; row < T; ++row) compare(reference[prefix+row].data(), logits.data()+(size_t)row*V, V, "verify row");
         require(!model.window_commit(0, err), "invalid keep must leave both windows pending");
@@ -85,13 +98,20 @@ int main(int argc, char** argv) {
     // Native MTP must match the SAME distributed trunk's ordinary greedy generation, including state after rejection.
     model.reset();
     require(model.forward(prefix, logits, err), err);
+    if (refresh) {
+        require(model.refresh_stage_helper(err), err);
+        require(model.snapshot_save(), "save an active prefix after helper refresh");
+    }
     std::vector<int> plain;
     for (int i = 0; i < 24; ++i) {
         const int t = pick(logits.data(), V); plain.push_back(t);
         require(model.forward({t}, logits, err), err);
     }
-    model.reset();
-    require(model.forward(prefix, logits, err), err);
+    if (refresh) require(model.snapshot_restore(), "restore the same prefix and helper epoch for MTP");
+    else {
+        model.reset();
+        require(model.forward(prefix, logits, err), err);
+    }
     strata::kernels::SamplerParams sampler{}; sampler.greedy = true;
     std::vector<int> mtp;
     int64_t produced = 0;

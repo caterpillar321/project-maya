@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include "strata/kernels/glm_helper_owner.hpp"
 #include <cuda_runtime.h>
 
 namespace strata::kernels::glmf {
@@ -223,7 +224,7 @@ constexpr int kSpares = 3;
 /// The per-device routing state (device memory unless noted).
 struct MoeDev {
     unsigned long long* tab = nullptr;         // [3 tables, see above]
-    const uint8_t* helper_owned = nullptr;      // optional GLM helper ownership, checked before primary admission
+    const uint8_t* helper_owned = nullptr;      // external helper=1, fixed CPU=2; checked before primary admission
     const uint8_t* copy_kind = nullptr;         // copy_lane flags per key; nullptr keeps the legacy lane policy
     const unsigned long long* copy_lane_plan = nullptr;   // [9 RAM misses][9 mandatory CPU experts][2 shared trip]
     int n_keys = 0;                            // N = n_layers * n_expert
@@ -240,6 +241,7 @@ struct MoeDev {
     unsigned long long* pf_src = nullptr;      // [8] the NEXT layer's predicted experts being prefetched: source,
     unsigned long long* pf_dst = nullptr;      // [8] ... their (claimed spare) slot,
     int* pf_n = nullptr;                       // ... and how many (the side-stream fetch kernel reads these)
+    int pf_keep_spares = 1;                    // private window scratch can reserve zero spares for actual misses
     unsigned int* seq = nullptr;               // the device's request counter
     unsigned int* wait_seq = nullptr;          // the seq the wait kernel must see answered (0 = none)
     void* ring = nullptr;                      // host-mapped request ring (device pointer)

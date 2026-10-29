@@ -44,5 +44,17 @@ int main() {
     candidates = {4, 1, 3};
     strata::core::glm_rank_fixed_helper(candidates, std::vector<uint32_t>(6), {}, 2);
     require(candidates == std::vector<int>({4, 1, 3}), "absent profile preserves tied candidate order");
+    const auto fixed = glm_helper_owners(6, local, network, {1, 0, 0, 0, 0, 1});
+    require(fixed == std::vector<uint8_t>({2, 1, 1, 1, 1, 2}),
+            "fixed CPU residents retain their source-pointer tag alongside external helpers");
+    require(glm_helper_owners(2, {1, 0}, {}, {1, 1}) == std::vector<uint8_t>({1, 2}),
+            "an external helper cannot accidentally be reclassified as a CPU pointer owner");
+    const std::vector<int> eligible{5, 11, 4, 10, 3, 9, 2, 8};
+    require(strata::core::glm_fixed_cpu_keys(eligible, 6, 50) == std::vector<int>({4, 10, 2, 8}),
+            "fixed CPU budget is spread over each layer, independent of interleaved profile order");
+    require(strata::core::glm_fixed_cpu_keys(eligible, 6, 100) == eligible, "all eligible CPU ownership");
+    require(strata::core::glm_fixed_cpu_keys(eligible, 6, 0).empty() &&
+            strata::core::glm_fixed_cpu_keys(eligible, 6, 101).empty() &&
+            strata::core::glm_fixed_cpu_keys(eligible, 0, 50).empty(), "invalid or disabled CPU budgets select nothing");
     std::puts("glm_helper_ownership_test: OK (network-only upload, local compatibility, routing flags, bounds)");
 }

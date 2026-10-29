@@ -600,7 +600,7 @@ struct Glm5Model::FastState {
     //      (exclusive tiers).  rtab (on the device) points at HOLDING slots only.
     // kRPin: still the expert's live copy, being promoted (never a victim until the copy landed)
     enum : char { kRFree = 0, kRHold = 1, kRRelease = 2, kRDemote = 3, kRNew = 4, kRLoad = 5, kRPin = 6,
-                  kRHelper = 7 };   // helper-owned UMA weights: readable by prefill, never a RAM-tier victim
+                  kRHelper = 7 };   // helper UMA or fixed CPU weights: readable, never a RAM-tier victim
     struct RamClass {
         size_t stride = 0;
         uint8_t* base = nullptr;
@@ -748,9 +748,20 @@ struct Glm5Model::FastState {
     std::vector<strata::core::netproto::HashRef> copy_refs;
     std::vector<uint64_t> copy_hash;
     std::atomic<uint64_t> copy_sent{0}, copy_routes{0}, copy_kept{0};
-    bool aux_owns(int key) const { return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0); }
+    int stage_cpu_percent = 0;
+    bool stage_cpu_batch = false;
+    bool stage_ram_canonical = false;
+    std::atomic<uint64_t> fixed_cpu_batches{0}, fixed_cpu_entries{0}, fixed_cpu_unique{0};
+    std::atomic<uint64_t> window_prefetch_issued{0}, window_prefetch_used{0};
+    std::array<uint64_t, 17> stage_timing_n{};
+    std::array<double, 17> stage_timing_front_ms{}, stage_timing_tail_ms{};
+    std::vector<uint8_t> cpu_owned;
+    bool aux_owns(int key) const {
+        return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0) ||
+               (!cpu_owned.empty() && cpu_owned[(size_t) key] != 0);
+    }
     std::vector<uint8_t> owned_all() const {   // what the primary router leaves to the helpers
-        return glm_helper_owners((size_t) n_keys, helper.owners(), net_of);
+        return glm_helper_owners((size_t) n_keys, helper.owners(), net_of, cpu_owned);
     }
     uint8_t* helper_owned_d = nullptr;   // primary router excludes these experts from PCIe admission/prefetch
     uint64_t helper_swaps = 0;
@@ -783,6 +794,10 @@ struct Glm5Model::FastState {
         int* cells = nullptr;                     // each token's selected cells (n_sel_max a row): one batched attention
         void *qr_q = nullptr, *attn_q = nullptr;
         float *rlog = nullptr, *sh_g = nullptr, *sh_u = nullptr, *dg = nullptr, *du = nullptr;
+        float* pred_rlog = nullptr;
+        unsigned long long* prefetch_buf = nullptr;   // [2 layer parities][tmax][src8,dst8]
+        int* prefetch_n = nullptr;
+        bool prefetch_pending = false;
         void* dhq = nullptr;
         float* head_x = nullptr;
         void* head_xq = nullptr;

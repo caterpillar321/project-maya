@@ -41,6 +41,14 @@ namespace strata::core {
 
 namespace {
 
+bool window_prefetch_on() {
+    static const bool enabled = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return enabled;
+}
+
 float* take_f(uint8_t*& at, size_t floats) {
     float* p = (float*) at;
     at += (floats * sizeof(float) + 255u) & ~(size_t) 255u;
@@ -161,7 +169,8 @@ bool Glm5Model::win_alloc(int tmax, std::string& err) {
                         2 * al(T * 8 * 8) + 2 * al(T * 8 * f4) + al(T * E * f4) + al(T * f4) +
                         al(T * ((size_t) FF / 32 * q8)) + al(T * E * f4) + al(T * 8 * ((size_t) g.n_ff_exp / 32 * q8)) +
                         al(T * 8 * E * f4) + al(T * 8 * 8) + 3 * al((T * 8 + 1) * f4) + al(64) + al(T * 64) +
-                        (exl3_ ? al(T * 8 * (size_t) g.n_ff_exp * f4) : 0);
+                        (exl3_ ? al(T * 8 * (size_t) g.n_ff_exp * f4) : 0) +
+                        (window_prefetch_on() ? al(T * g.n_expert * f4) + al(2 * T * 16 * 8) + al(2 * T * sizeof(int)) : 0);
     if (cudaMalloc(&W.arena, need) != cudaSuccess) {
         cudaGetLastError();
         W.arena = nullptr;
@@ -189,6 +198,11 @@ bool Glm5Model::win_alloc(int tmax, std::string& err) {
     W.iq = take_f(at, T * g.idx_heads * g.idx_key);
     W.attn_q = take_b(at, T * W.aq_s);
     W.rlog = take_f(at, T * g.n_expert);
+    if (window_prefetch_on()) {
+        W.pred_rlog = take_f(at, T * g.n_expert);
+        W.prefetch_buf = (unsigned long long*) take_b(at, 2 * T * 16 * 8);
+        W.prefetch_n = (int*) take_b(at, 2 * T * sizeof(int));
+    }
     W.sh_g = take_f(at, T * FF);
     W.sh_u = take_f(at, T * FF);
     W.dg = take_f(at, T * g.n_ff_dense);
@@ -507,8 +521,8 @@ bool Glm5Model::fast_dsa_window(int il, int64_t p0, int t0, int T, std::string& 
 }
 
 // the MoE FFN of every token: the router and the shared expert's gate/up for all T at once, then each token's route,
-// tiers, routed experts and CPU lane in order - fast_moe's arithmetic without its prediction and look-ahead (they
-// read ahead for the NEXT layer of the same token).  The plan, the misses' answer, the CPU lane's answer and the
+// tiers, routed experts and CPU lane in order. Opt-in private T2/T3 prefetch predicts the NEXT layer of each row.
+// The plan, the misses' answer, the CPU lane's answer and the
 // scratch slots are single: a token's are used up before the next token's route.
 // tokens t0 .. t0 + T - 1; part 0: the whole FFN, 1: its front (router, routes, fetches), 2: its back (the experts and
 // the CPU lane's answers) - a staggered window issues another group's attention between the two.  gid: the group
@@ -524,22 +538,42 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     const auto trace = [&](const char* stage, int row = -1) {
         if (F->win_trace) F->win_trace->mark(il, stage, row, s);
     };
+    static const bool prefetch_unstaggered = [] {
+        const char* v = getenv("STRATA_GLM_WIN_STAGGER");
+        return v && std::strcmp(v, "0") == 0;
+    }();
+    static const bool prefetch_t1 = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH_T1");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    const bool window_pf = window_prefetch_on() && prefetch_unstaggered && part == 0 && t0 == 0 &&
+                          (T == 2 || T == 3 || (T == 1 && prefetch_t1)) &&
+                          W.T == T && !W.per_token && !W.piped && n_parts_ == 1 &&
+                          F->rows_scr && F->win_scratch_rows >= T && F->rows_group >= T &&
+                          glmfast::off_by_default_on_amd("STRATA_GLM_WIN_BATCH");
+    const bool predict = window_pf && il + 1 < l1_ && F->L[(size_t) il + 1].moe;
+    // Low-ranked predictions waste the same link they are intended to hide. Keep the top four only.
+    static const int prediction_rank = 4;
     if (part != 2) {
-        gf::MvJob j[3];
+        gf::MvJob j[4];
         const void* xq0 = (const uint8_t*) W.xq + (size_t) t0 * W.xq_s;
         j[0] = {Ly.router, nullptr, W.x + (size_t) t0 * E, W.rlog + (size_t) t0 * g.n_expert, nullptr, 1.0f, gf::kTypeBF16, E,
                 g.n_expert};
         const float* x0 = W.x + (size_t) t0 * E;
         j[1] = {Ly.sh_gate.q, xq0, x0, W.sh_g + (size_t) t0 * FFs, nullptr, 1.0f, Ly.sh_gate.type, E, FFs};
         j[2] = {Ly.sh_up.q, xq0, x0, W.sh_u + (size_t) t0 * FFs, nullptr, 1.0f, Ly.sh_up.type, E, FFs};
-        const int64_t ys[3] = {g.n_expert, FFs, FFs};
-        for (int i = 0; i < 3; ++i) {
+        const int nj = predict ? 4 : 3;
+        if (predict) j[3] = {F->L[(size_t) il + 1].router, nullptr, x0,
+                            W.pred_rlog + (size_t) t0 * g.n_expert, nullptr, 1.0f,
+                            gf::kTypeBF16, E, g.n_expert};
+        const int64_t ys[4] = {g.n_expert, FFs, FFs, g.n_expert};
+        for (int i = 0; i < nj; ++i) {
             j[i].ncol = T;
             j[i].xq_cstride = (int64_t) W.xq_s;
             j[i].xf_cstride = E;
             j[i].y_cstride = ys[i];
         }
-        if (!gf::mv(j, 3, s)) { err = "glm window: router / shared expert"; return false; }
+        if (!gf::mv(j, nj, s)) { err = "glm window: router / shared expert"; return false; }
         if (prof) W.mark("moe_mv", s);
         trace("moe_router_shared_up");
     }
@@ -605,7 +639,8 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         return v == nullptr || std::atoi(v) != 0;
     }();
     const bool multi = !batch_env && multi_env && !Ly.exl3 && part == 0 && T > 1;
-    const bool batched = (batch_env || multi) && !W.per_token && W.mplan_ptr != nullptr && (T > 1 || part != 0);
+    const bool batched = (batch_env || multi) && !W.per_token && W.mplan_ptr != nullptr &&
+                         (T > 1 || part != 0 || window_pf);
     if (F->win_scratch_rows > 0 && (t0 < 0 || T < 1 || T > W.T || t0 > W.T - T)) {
         err = "glm window scratch: token group is outside the current window";
         return false;
@@ -653,6 +688,13 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     if (batched) {
         const auto tok_dev = [&](int t) {
             gf::MoeDev mt = md;
+            if (window_pf) {
+                const size_t index = (size_t) (il & 1) * W.tmax + t;
+                mt.pf_src = W.prefetch_buf + index * 16;
+                mt.pf_dst = mt.pf_src + 8;
+                mt.pf_n = W.prefetch_n + index;
+                mt.pf_keep_spares = 0;   // every real miss has a row-private scratch slot
+            }
             mt.plan_ptr = W.mplan_ptr + 8 * t;
             mt.plan_w = W.mplan_w + 8 * t;
             mt.plan_id = W.mplan_id + 8 * t;
@@ -688,7 +730,10 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             gf::moe_route(W.rlog + (size_t) t * g.n_expert, Ly.router_bias, g.n_expert, g.n_exp_used, g.w_scale,
                           g.norm_w != 0, il, W.x + (size_t) t * E, E, mt, W.sh_g + (size_t) t * FFs,
                           W.sh_u + (size_t) t * FFs, g.swiglu_shexp, FFs, (uint8_t*) W.sh_hq + (size_t) t * W.sh_hq_s, s,
-                          nullptr, nullptr, 0, nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, 0, 0, t,
+                          predict ? W.pred_rlog + (size_t) t * g.n_expert : nullptr,
+                          predict ? F->L[(size_t) il + 1].router_bias : nullptr,
+                          predict ? (T == 1 || (T == 2 && t == 0) ? 2 : 1) : 0,
+                          nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, prediction_rank, 0, t,
                           private_scratch ? nullptr : scr, t0 + T);
             ++F->expected;
             trace("moe_route", t);
@@ -711,6 +756,26 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                 gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::NoDiskMiss);
                 trace("moe_fetch_ram_rows", t);
             }
+        if (window_pf) {
+            // The previous layer installed pointers early; all of their bytes must arrive before use.
+            if (W.prefetch_pending) {
+                if (!glmfast::cuda_ok(cudaStreamWaitEvent(s, F->ev_pf_prev, 0), "window prefetch join", err)) return false;
+                trace("moe_prefetch_join");
+            }
+            W.prefetch_pending = false;
+            if (predict) {
+                // Current demand fetches go first. The side stream then fills the NEXT layer while current
+                // experts and next-layer attention compute. Alternating row-local lists stay immutable until
+                // the following layer's join, before the same parity can be reused.
+                if (!glmfast::cuda_ok(cudaEventRecord(F->ev_pred, s), "window prefetch trigger", err) ||
+                    !glmfast::cuda_ok(cudaStreamWaitEvent(F->ps, F->ev_pred, 0), "window prefetch trigger wait", err)) return false;
+                for (int t = t0; t < t0 + T; ++t)
+                    gf::moe_prefetch(tok_dev(t), F->L[(size_t) il + 1].blob, F->ps);
+                if (!glmfast::cuda_ok(cudaEventRecord(F->ev_pf, F->ps), "window prefetch completion", err)) return false;
+                std::swap(F->ev_pf, F->ev_pf_prev);
+                W.prefetch_pending = true;
+            }
+        }
         if (prof_b) W.mark("moe_routes", s);
         }
         if (part == 1) return true;
@@ -1065,8 +1130,12 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         return false;
     }
     if (remote_front_) {
+        static const bool timing = getenv("STRATA_GLM_STAGE_TIMING") != nullptr;
+        const bool measure = timing && fast_->tier_audit.active && T >= 1 && T <= kWinMax;
+        const auto start = std::chrono::steady_clock::now();
         std::vector<float> residual;
         if (!remote_front_->verify(pos_, tokens, T, residual, err)) { stage_failed_ = true; return false; }
+        const auto boundary = std::chrono::steady_clock::now();
         StageWindowResult result;
         if (!stage_window(tokens, T, residual.data(), residual.size(), result, err, sp)) {
             stage_failed_ = true;
@@ -1076,6 +1145,12 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
             err = "remote stage coordinator has no output head"; stage_failed_ = true; return false;
         }
         std::copy(result.picks.begin(), result.picks.end(), out);
+        if (measure) {
+            ++fast_->stage_timing_n[(size_t) T];
+            fast_->stage_timing_front_ms[(size_t) T] += std::chrono::duration<double, std::milli>(boundary - start).count();
+            fast_->stage_timing_tail_ms[(size_t) T] += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - boundary).count();
+        }
         return true;
     }
     return window_impl(tokens, T, out, err, sp, nullptr);
@@ -1265,6 +1340,10 @@ bool Glm5Model::window_impl(const int32_t* tokens, int T, int32_t* out, std::str
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         cudaSetDevice(m->dev_);
         if (!glmfast::cuda_ok(cudaStreamSynchronize(m->fast_->cs), "glm window prepare sync", err)) return false;
+        if (window_prefetch_on()) {
+            if (!glmfast::cuda_ok(cudaStreamSynchronize(m->fast_->ps), "glm window prefetch drain", err)) return false;
+            m->fast_->win.prefetch_pending = false;
+        }
         if (!m->win_alloc(kWinMax, err)) return false;
         if (!m->fast_boundary(err)) return false;
         // (a window of one token keeps it: nothing to restore)

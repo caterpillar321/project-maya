@@ -4,9 +4,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <unordered_map>
 #include <vector>
+#include "strata/kernels/glm_helper_owner.hpp"
 
 namespace strata::core {
+
+// Select a fixed, evenly spaced fraction of each layer's eligible profile-ranked RAM experts.
+// Selection never depends on a request's cache state or on the other experts in that route.
+inline std::vector<int> glm_fixed_cpu_keys(const std::vector<int>& eligible, int experts, int percent) {
+    std::vector<int> keys;
+    if (experts <= 0 || percent <= 0 || percent > 100) return keys;
+    std::unordered_map<int, int> ordinal;
+    for (int key : eligible) {
+        if (key < 0) continue;
+        const int n = ordinal[key / experts]++;
+        if ((n + 1) * percent / 100 != n * percent / 100) keys.push_back(key);
+    }
+    return keys;
+}
 
 // A fixed helper cannot learn a better allocation after startup. Preserve learned usage first, but use
 // the supplied global profile to break ties (fresh sessions have zero usage for every expert).
@@ -31,10 +47,13 @@ inline void glm_rank_fixed_helper(std::vector<int>& candidates, const std::vecto
 // The GPU router reads one ownership byte for every model key, including when only network helpers exist.
 // Local ownership is optional; a network entry is a 1-based helper index rather than a boolean.
 inline std::vector<uint8_t> glm_helper_owners(size_t keys, const std::vector<uint8_t>& local,
-                                             const std::vector<uint8_t>& network) {
+                                             const std::vector<uint8_t>& network,
+                                             const std::vector<uint8_t>& cpu = {}) {
     std::vector<uint8_t> owners(keys, 0);
     for (size_t k = 0; k < keys && k < local.size(); ++k) owners[k] = local[k];
     for (size_t k = 0; k < keys && k < network.size(); ++k) owners[k] |= network[k] != 0;
+    for (size_t k = 0; k < keys && k < cpu.size(); ++k)
+        if (!owners[k] && cpu[k]) owners[k] = strata::kernels::glmf::kFixedCpuOwner;
     return owners;
 }
 

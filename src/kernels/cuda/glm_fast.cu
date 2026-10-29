@@ -4141,8 +4141,9 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
                 // left out: the expert kernels skip a null plan entry (a draft only has to be a good guess)
             } else if (ptr == 0ull && a.d.helper_owned && a.d.helper_owned[key]) {
                 // A helper resident is claimed BEFORE PCIe quotas, promotion or disk skipping.
-                // cpu_src stays zero: the host resolves this key in the helper's own cache.
+                // Fixed CPU experts retain a pinned RAM source; external helpers resolve their own cache.
                 cpu |= 1u << i;
+                if (a.d.helper_owned[key] == kFixedCpuOwner) s_cs[i] = s_rtab[i];
             } else if (ptr == 0ull) {
                 src = s_rtab[i];
                 if (src != 0ull && ((host_set >> i) & 1u)) {
@@ -4250,7 +4251,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
                         ++navail;
                         if (first < 0) first = j;
                     }
-                if (navail < 2) break;
+                if (navail <= a.d.pf_keep_spares) break;
                 const unsigned long long dst = sp1[first];
                 sp1[first] = 0ull;
                 a.d.tab[key] = dst;

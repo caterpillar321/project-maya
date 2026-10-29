@@ -1924,6 +1924,14 @@ static int glm_pack_generate(const Options& o) {
         const char* finish = "length";
         auto t0 = std::chrono::steady_clock::now();
         if (prep_prompt(prompt, reuse, finish, t0) != 0) return 1;
+        if (const char* refresh = getenv("STRATA_GLM_STAGE_HELPER_REFRESH");
+            refresh && std::strcmp(refresh, "1") == 0 && !stop_req.load()) {
+            if (!model.refresh_stage_helper(err)) {
+                std::fprintf(stderr, "stage helper refresh: %s\n", err.c_str());
+                std::printf("ERR stage helper refresh failed\n");
+                return 1;
+            }
+        }
         std::vector<float> lg;
         if (stop_req.load()) finish = "cancel";
         const auto t1 = std::chrono::steady_clock::now();

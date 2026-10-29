@@ -652,6 +652,25 @@ bool Glm5Model::fast_setup(std::string& err) {
     cudaSetDevice(dev_);
     auto* F = new FastState();
     fast_ = F;
+    if (const char* p = getenv("STRATA_GLM_STAGE_CPU_PERCENT")) {
+        char* end = nullptr;
+        const long value = std::strtol(p, &end, 10);
+        const char* helper = getenv("STRATA_GLM_EXPERT_HELPER");
+        if (end == p || *end || value < 0 || value > 100 ||
+            (value > 0 && (!stage_windows_enabled_ || !helper || !*helper))) {
+            err = "GLM fixed CPU: STAGE_CPU_PERCENT needs 0..100 and a stage with a local expert helper";
+            return false;
+        }
+        F->stage_cpu_percent = (int) value;
+    }
+    if (const char* p = getenv("STRATA_GLM_STAGE_CPU_BATCH")) {
+        F->stage_cpu_batch = std::strcmp(p, "1") == 0;
+        if ((std::strcmp(p, "0") && std::strcmp(p, "1")) ||
+            (F->stage_cpu_batch && F->stage_cpu_percent == 0)) {
+            err = "GLM fixed CPU: STAGE_CPU_BATCH needs 0/1 and enabled fixed CPU ownership";
+            return false;
+        }
+    }
     // Not on Windows: there an APU's GPU memory is a fixed carve-out (AMD's Variable Graphics Memory, or the BIOS)
     // that Windows does not count as RAM, so it is sized like a discrete card - the pool from what HIP reports free,
     // the RAM tier from the free RAM and commit (below)
@@ -1709,6 +1728,14 @@ bool Glm5Model::fast_setup(std::string& err) {
             // for a class of one layer (the NextN block), which then never allocated and stopped the start ("did not
             // allocate")
             cls_cap[c] = std::max<int64_t>(1, (int64_t) (cls_weight[c] / (double) cls_stride[c])) + 16;
+            // Canonical stage RAM retains primary-GPU weights too. Its per-class cap therefore includes
+            // those keys; the explicit class plan still cannot increase total pinned bytes.
+            if (const char* canonical = getenv("STRATA_GLM_STAGE_RAM_CANONICAL");
+                stage_windows_enabled_ && canonical && std::strcmp(canonical, "1") == 0) {
+                cls_cap[c] = 16;
+                for (int il = l0_; il < lt_; ++il)
+                    if (F->L[(size_t) il].moe && F->layer_rc[(size_t) il] == (int) c) cls_cap[c] += g.n_expert;
+            }
             cls_n[c] = std::min<int64_t>(n, cls_cap[c]);
         }
         // Opt-in startup rebalancing only: retain the existing class/slot addressing and never pin more bytes.
@@ -2582,6 +2609,137 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         err = "GLM net helper: no helper endpoints configured";
         return false;
     }
+    if (const char* canonical = getenv("STRATA_GLM_STAGE_RAM_CANONICAL"); canonical && std::strcmp(canonical, "1") == 0) {
+        if (!stage_windows_enabled_ || !have_local || F->helper.integrated() || !F->net.empty() ||
+            F->ram_resident || F->backing_keep) {
+            err = "GLM canonical stage RAM needs a discrete fixed local helper, no net helper or existing backing policy";
+            return false;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        std::vector<int> need(F->rc.size(), 16);
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            const int c = F->layer_rc[(size_t) il];
+            for (int e = 0; e < g_.n_expert; ++e)
+                need[(size_t) c] += !F->helper.owns(il * g_.n_expert + e);
+        }
+        bool fits = true;
+        std::string required;
+        for (size_t c = 0; c < need.size(); ++c) {
+            if (c) required += ",";
+            required += std::to_string(need[c]);
+            fits &= F->rc[c].n >= need[c];
+        }
+        if (!fits) {
+            err = "GLM canonical stage RAM: class slots insufficient; need at least RAM_CLASS_SLOTS=" + required;
+            return false;   // no ownership/source has changed yet
+        }
+        size_t released = 0, backed = 0, copied = 0;
+        for (int key = 0; key < F->n_keys; ++key) {
+            if (!F->helper.owns(key)) continue;
+            const int rs = F->ram_of[(size_t) key];
+            if (rs < 0) continue;
+            auto& R = F->rc[(size_t) F->layer_rc[(size_t) (key / g_.n_expert)]];
+            if (R.st[(size_t) rs] != FastState::kRHold) {
+                err = "GLM canonical stage RAM: helper duplicate is not settled"; return false;
+            }
+            R.st[(size_t) rs] = FastState::kRFree;
+            R.key[(size_t) rs] = -1;
+            F->ram_of[(size_t) key] = -1;
+            released += R.stride;
+        }
+        std::vector<std::vector<int>> free_slots(F->rc.size());
+        for (size_t c = 0; c < F->rc.size(); ++c)
+            for (int s = 0; s < F->rc[c].n; ++s)
+                if (F->rc[c].st[(size_t) s] == FastState::kRFree) free_slots[c].push_back(s);
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            const int c = F->layer_rc[(size_t) il];
+            auto& R = F->rc[(size_t) c];
+            for (int e = 0; e < g_.n_expert; ++e) {
+                const int key = il * g_.n_expert + e;
+                if (F->helper.owns(key) || F->ram_of[(size_t) key] >= 0) continue;
+                if (free_slots[(size_t) c].empty()) { err = "GLM canonical stage RAM: reserved class exhausted"; return false; }
+                const int rs = free_slots[(size_t) c].back(); free_slots[(size_t) c].pop_back();
+                uint8_t* dst = R.base + (size_t) rs * R.stride;
+                const int vs = F->slot_of[(size_t) key];
+                if (vs >= 0) {
+                    if (!glmfast::cuda_ok(cudaMemcpy(dst, F->lp[(size_t) il].slot_ptr(vs), F->L[(size_t) il].blob,
+                                                    cudaMemcpyDeviceToHost), "stage canonical initial backing", err)) return false;
+                } else {
+                    for (int role = 0; role < 3; ++role) fast_read_part(il, e, role, dst, 0, 1);
+                }
+                R.key[(size_t) rs] = key;
+                R.tick[(size_t) rs] = F->clock;
+                R.st[(size_t) rs] = FastState::kRHold;
+                F->ram_of[(size_t) key] = rs;
+                copied += R.stride;
+                ++backed;
+            }
+        }
+        std::vector<unsigned long long> table((size_t) F->n_keys, 0);
+        size_t bytes = 0;
+        for (auto& R : F->rc) R.backing_slots = R.n - 16;
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            for (int e = 0; e < g_.n_expert; ++e) {
+                const int key = il * g_.n_expert + e;
+                if (F->helper.owns(key)) continue;
+                const int rs = F->ram_of[(size_t) key];
+                if (rs < 0 || R.key[(size_t) rs] != key || R.st[(size_t) rs] != FastState::kRHold) {
+                    err = "GLM canonical stage RAM: incomplete source coverage"; return false;
+                }
+                table[(size_t) key] = (unsigned long long) (R.base + (size_t) rs * R.stride);
+                bytes += R.stride;
+            }
+        }
+        if (!glmfast::cuda_ok(cudaMemcpy(F->tab + F->n_keys, table.data(), table.size() * sizeof(table[0]),
+                                        cudaMemcpyHostToDevice), "stage canonical RAM table", err)) return false;
+        F->backing_keep = F->stage_ram_canonical = true;
+        F->backing_bytes = bytes;
+        F->backing_from = l0_; F->backing_to = lt_;
+        std::fprintf(stderr, "glm canonical stage RAM: %.2f GiB helper duplicates released; %zu sources added "
+                             "(%.2f GiB); %.2f GiB canonical coverage, zero uncovered, %.3f s\n",
+                     (double) released / 1073741824.0, backed, (double) copied / 1073741824.0,
+                     (double) bytes / 1073741824.0,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+    }
+    if (F->stage_cpu_percent > 0) {
+        if (!F->cpu_pool || !F->net.empty() || F->helper.integrated()) {
+            err = "GLM fixed CPU: needs an active CPU pool and a discrete local helper without network helpers";
+            return false;
+        }
+        std::vector<int> eligible;
+        for (int key : ranked) {
+            if (F->aux_owns(key) || F->slot_of[(size_t) key] >= 0) continue;
+            const int il = key / g_.n_expert;
+            const int rs = F->ram_of[(size_t) key];
+            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            if (rs >= 0 && R.st[(size_t) rs] == FastState::kRHold && F->cpu_fmt[(size_t) il].n_ff > 0)
+                eligible.push_back(key);
+        }
+        const auto selected = glm_fixed_cpu_keys(eligible, g_.n_expert, F->stage_cpu_percent);
+        if (selected.empty()) { err = "GLM fixed CPU: no eligible pinned RAM experts"; return false; }
+        F->cpu_owned.assign((size_t) F->n_keys, 0);
+        size_t bytes = 0;
+        for (int key : selected) {
+            auto& R = F->rc[(size_t) F->layer_rc[(size_t) (key / g_.n_expert)]];
+            R.st[(size_t) F->ram_of[(size_t) key]] = FastState::kRHelper;
+            F->cpu_owned[(size_t) key] = 1;
+            bytes += R.stride;
+        }
+        // Only the explicit ownership map routes CPU work. GPU-owned experts may still move between
+        // RAM and VRAM, while CPU experts keep their arithmetic and protected RAM address for this session.
+        F->cpu_plan = F->cpu_plan_start = 0;
+        F->cpu_retime = false;
+        if (F->stage_cpu_batch) cpu_win_alloc(F, g_, false);
+        std::fprintf(stderr, "glm stage fixed CPU: %zu/%zu eligible experts (%d%%), %.2f GiB protected RAM; "
+                             "dynamic CPU quota off, GPU cache still adaptive\n",
+                     selected.size(), eligible.size(), F->stage_cpu_percent, (double) bytes / 1073741824.0);
+        if (F->stage_cpu_batch)
+            std::fprintf(stderr, "glm stage fixed CPU: merge window expert reads on the existing CPU pool\n");
+    }
     if (!glmfast::cuda_ok(cudaMalloc((void**) &F->helper_owned_d, (size_t) F->n_keys), "GLM helper ownership", err) ||
         !glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(), (size_t) F->n_keys,
                                     cudaMemcpyHostToDevice), "GLM helper ownership upload", err)) return false;
@@ -2627,23 +2785,42 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
     return true;
 }
 
-bool Glm5Model::fast_helper_adapt(std::string& err) {
+bool Glm5Model::refresh_stage_helper(std::string& err) {
+    FastState* F = fast_;
+    if (!stage_windows_enabled_ || !remote_front_ || !F || F->helper.device() < 0 || F->helper.integrated() ||
+        !F->net.empty() || F->stage_ram_canonical || stage_window_pending_ || stage_failed_ || remote_front_->pending()) {
+        err = "GLM stage refresh: needs an idle remote coordinator with a discrete local helper";
+        return false;
+    }
+    cudaSetDevice(dev_);
+    if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "stage refresh sync", err) || !fast_boundary(err)) return false;
+    const auto start = std::chrono::steady_clock::now();
+    const uint64_t before = F->helper_swaps;
+    if (!fast_helper_adapt(err, true, 256)) { stage_failed_ = true; return false; }
+    std::fprintf(stderr, "glm stage helper refresh: %llu replacements after prefill, %.3f ms; "
+                         "ownership fixed throughout decode\n", (unsigned long long) (F->helper_swaps - before),
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    return true;
+}
+
+bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_swaps) {
     FastState* F = fast_;
     // Stage sessions use the agreed fixed expert ownership. Moving an expert between the trunk and helper
     // changes its activation/reduction path, so a reset/replay can otherwise change the verifier's arithmetic.
     // The legacy single-trunk policy is unchanged; a future stage replan needs an explicit synchronized epoch.
-    if (stage_windows_enabled_) return true;
+    if (stage_windows_enabled_ && !stage_refresh) return true;
     if (F->helper.device() < 0 || F->bg_hold) return true;
     auto primary = F->slot_of;
     for (const auto& m : F->bg) if (m.up) primary[(size_t) m.key] = m.vslot;
     // A pending RAM read/copy is not a candidate until it lands.
     for (size_t key = 0; key < primary.size(); ++key) {
+        if (!F->cpu_owned.empty() && F->cpu_owned[key]) { primary[key] = 0; continue; }
         const int rs = F->ram_of[key];
         if (rs < 0) continue;
         const auto& R = F->rc[(size_t) F->layer_rc[key / g_.n_expert]];
         if (R.st[(size_t) rs] != FastState::kRHold && R.st[(size_t) rs] != FastState::kRHelper) primary[key] = 0;
     }
-    const auto swaps = F->helper.swaps(F->cnt, primary, g_.n_expert, 8);
+    const auto swaps = F->helper.swaps(F->cnt, primary, g_.n_expert, max_swaps);
     for (const auto& s : swaps) {
         if (!F->net_of.empty() && F->net_of[(size_t) s.in] != 0) continue;   // already on a net helper
         const int il = s.in / g_.n_expert;
@@ -3057,6 +3234,13 @@ void Glm5Model::win_cpu_merged(int il, int nb, const gf::MoeRequest* const* rq, 
                 if (u == nu) ublob[nu++] = b;
                 u_ent[u][u_n[u]++] = e;
             }
+    if (F->stage_cpu_batch) {
+        uint64_t entries = 0;
+        for (int j = 0; j < nb; ++j) entries += (uint64_t) ne[j];
+        F->fixed_cpu_batches.fetch_add(1, std::memory_order_relaxed);
+        F->fixed_cpu_entries.fetch_add(entries, std::memory_order_relaxed);
+        F->fixed_cpu_unique.fetch_add((uint64_t) nu, std::memory_order_relaxed);
+    }
     const size_t act_b = kc::kNativeActBytes, h_b = kc::kNativeHBytes;
     if (!Ly.exl3)
         for (int j = 0; j < nb; ++j) kc::native_quant_act(nf, rq[j]->x, C.act.data() + (size_t) j * act_b);
@@ -3785,7 +3969,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
             tab += " " + std::to_string(k);
         }
     }
-    if (plan == 0ull) {
+    if (plan == 0ull && F->stage_cpu_percent == 0) {
         std::fprintf(stderr, "glm fast: CUDA%d CPU lane off: an expert %.3f ms on the CPU vs %.3f ms over PCIe\n", dev_,
                      c_ms, p_ms);
         win_lanes_stop();
@@ -4629,7 +4813,7 @@ bool Glm5Model::set_pcie_share(double share) {
     bool any = false;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         FastState* F = m->fast_;
-        if (F == nullptr || F->cpu_pool == nullptr) continue;
+        if (F == nullptr || F->cpu_pool == nullptr || F->stage_cpu_percent > 0) continue;
         unsigned long long plan = F->cpu_plan_start;
         if (share >= 0.0) {
             plan = 0;
@@ -4693,6 +4877,27 @@ void Glm5Model::fast_prof_flush() {
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         FastState* F = m->fast_;
         if (F == nullptr) continue;
+        const auto pf_issued = F->window_prefetch_issued.exchange(0);
+        const auto pf_used = F->window_prefetch_used.exchange(0);
+        if (pf_issued) std::fprintf(stderr, "glm window prefetch: %llu experts issued, %llu used by next window layer\n",
+                                   (unsigned long long) pf_issued, (unsigned long long) pf_used);
+        for (size_t t = 1; t < F->stage_timing_n.size(); ++t) {
+            const auto n = F->stage_timing_n[t];
+            if (!n) continue;
+            std::fprintf(stderr, "glm stage timing: T=%zu windows=%llu front_rpc_ms=%.6f tail_ms=%.6f\n", t,
+                         (unsigned long long) n, F->stage_timing_front_ms[t] / n, F->stage_timing_tail_ms[t] / n);
+            F->stage_timing_n[t] = 0;
+            F->stage_timing_front_ms[t] = F->stage_timing_tail_ms[t] = 0;
+        }
+        if (F->stage_cpu_batch) {
+            const auto batches = F->fixed_cpu_batches.exchange(0);
+            const auto entries = F->fixed_cpu_entries.exchange(0);
+            const auto unique = F->fixed_cpu_unique.exchange(0);
+            if (batches) std::fprintf(stderr, "glm fixed CPU window: %llu batches, %llu routed expert entries, "
+                                             "%llu distinct expert evaluations\n",
+                                     (unsigned long long) batches, (unsigned long long) entries,
+                                     (unsigned long long) unique);
+        }
         if (F->tier_audit_on) {
             FastState::TierAudit a;
             uint64_t pending = 0;
@@ -4865,6 +5070,7 @@ void Glm5Model::fast_service() {
     const Glm5Geometry& g = g_;
     const int K = g.n_exp_used;
     unsigned int next = 1;
+    std::vector<uint8_t> prefetched_window_keys((size_t) F->n_keys, 0);
     // Idle (through a prompt, between requests) the thread polls the ring with sleeps instead of spinning: it held one
     // core per GPU at 100% while the server waited (2x V100: 200% CPU idle), a core a 6-core PC's prompt lane and the
     // system then lacked, and the server's stall watchdog could never see a stuck engine as idle.  A decode's routes
@@ -4891,6 +5097,50 @@ void Glm5Model::fast_service() {
         if (w_n > 0) win_cpu_merged(w_rq[0]->layer, w_n, w_rq, w_ans, w_seq);
         F->processed.fetch_add((uint64_t) w_held, std::memory_order_release);
         w_n = w_held = 0;
+    };
+    // Fixed CPU ownership can batch alongside a local GPU helper. Keep the GPU sum in its real
+    // answer slot, run CPU-only copies of the requests into private answers, then add and publish.
+    // No real answer sequence is released before BOTH contributions are complete.
+    struct FixedHeld {
+        gf::MoeRequest cpu;
+        gf::CpuAnswer result;
+        gf::CpuAnswer* destination = nullptr;
+        unsigned int sequence = 0;
+        std::chrono::steady_clock::time_point began;
+    };
+    std::unique_ptr<FixedHeld[]> fixed_q;
+    if (F->stage_cpu_batch) fixed_q.reset(new FixedHeld[kWinMax]);
+    int fixed_n = 0;
+    const auto fixed_flush = [&] {
+        if (fixed_n == 0) return;
+        const auto started = std::chrono::steady_clock::now();
+        const gf::MoeRequest* requests[kWinMax];
+        gf::CpuAnswer* answers[kWinMax];
+        unsigned int sequences[kWinMax];
+        for (int j = 0; j < fixed_n; ++j) {
+            requests[j] = &fixed_q[j].cpu;
+            answers[j] = &fixed_q[j].result;
+            sequences[j] = fixed_q[j].sequence;
+        }
+        const bool ok = !F->helper_failed.load(std::memory_order_acquire);
+        if (ok) win_cpu_merged(requests[0]->layer, fixed_n, requests, answers, sequences);
+        const auto elapsed = (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        g_rc_win.cpu_us.fetch_add(elapsed, std::memory_order_relaxed);
+        for (int j = 0; j < fixed_n; ++j) {
+            auto& h = fixed_q[j];
+            if (ok) {
+                for (int r = 0; r < g.n_embd; ++r) h.destination->part[r] += h.result.part[r];
+            } else std::fill_n(h.destination->part, g.n_embd, 0.0f);
+            std::atomic_thread_fence(std::memory_order_release);
+            h.destination->seq = h.sequence;
+            const auto us = (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - h.began).count();
+            g_rc_win.total_us.fetch_add(us, std::memory_order_relaxed);
+            F->helper_us.fetch_add(us, std::memory_order_relaxed);
+        }
+        F->processed.fetch_add((uint64_t) fixed_n, std::memory_order_release);
+        fixed_n = 0;
     };
     // a verify window's routes with net helpers (STRATA_GLM_NET_WIN_HOLD, on): each token's net requests go out as its
     // route comes, the answers are read once the layer's last token routed - one network wait a window layer instead of
@@ -4997,6 +5247,7 @@ void Glm5Model::fast_service() {
                           (rq->win_rows != 0 ? F->cpu_pool != nullptr && !F->has_helpers()
                                              : F->win_lane[0] != nullptr && F->win_lane[1] != nullptr);
         if (rq->error != 0) {
+            if (fixed_n > 0 && rq->win >= rq->win_n - 1) fixed_flush();
             if (held) {   // a window token's invalid route: nothing to compute, but it may be the layer's last
                 ++w_held;
                 if (rq->win >= rq->win_n - 1 || w_held >= kWinMax) win_flush();
@@ -5052,6 +5303,10 @@ void Glm5Model::fast_service() {
             uint64_t nh = 0;
             for (int i = 0; i < K; ++i) {
                 const int key = il * g.n_expert + ids[i];
+                if (rq->win_n > 1 && prefetched_window_keys[(size_t) key]) {
+                    F->window_prefetch_used.fetch_add(1, std::memory_order_relaxed);
+                    prefetched_window_keys[(size_t) key] = 0;
+                }
                 if (F->cnt[(size_t) key] < (1u << 24)) ++F->cnt[(size_t) key];
                 if (++F->usage[(size_t) key] >= (1u << 30))
                     for (auto& u : F->usage) u >>= 1;
@@ -5111,12 +5366,18 @@ void Glm5Model::fast_service() {
             }
             // the next layer's experts this route prefetched into that layer's spares: resident from now on
             const int npf = rq->pf_n;
+            if (rq->win_n > 1 && rq->win >= rq->win_n - 1)
+                std::fill_n(prefetched_window_keys.data() + (size_t) il * g.n_expert, g.n_expert, uint8_t{0});
             if (npf > 0 && il + 1 < (int) F->lp.size()) {
                 auto& P1 = F->lp[(size_t) il + 1];
                 auto& R1 = F->rc[(size_t) F->layer_rc[(size_t) il + 1]];
                 for (int q2 = 0; q2 < npf && q2 < 8; ++q2) {
                     const int e = rq->pf_ids[q2];
                     const int key = (il + 1) * g.n_expert + e;
+                    if (rq->win_n > 1) {
+                        prefetched_window_keys[(size_t) key] = 1;
+                        F->window_prefetch_issued.fetch_add(1, std::memory_order_relaxed);
+                    }
                     const int s = P1.slot_index(rq->pf_ptr[q2]);
                     if (s < 0 || s >= P1.n) continue;
                     P1.st[(size_t) s] = FastState::kResident;
@@ -5319,6 +5580,20 @@ void Glm5Model::fast_service() {
             // a verify window's token answers into its own slot (the device waits for them at the layer's end)
             gf::CpuAnswer* ans = F->cpu_ans_h;
             if (rq->win > 0 && rq->win < 16 && F->win.ans_h[rq->win] != nullptr) ans = F->win.ans_h[rq->win];
+            if (F->stage_cpu_percent > 0) {
+                for (int i = 0; i < ne; ++i) {
+                    const int key = blob_key[i];
+                    const int rs = F->ram_of[(size_t) key];
+                    const auto& R = F->rc[(size_t) F->layer_rc[(size_t) (key / g.n_expert)]];
+                    if (!F->cpu_owned[(size_t) key] || rs < 0 || R.st[(size_t) rs] != FastState::kRHelper ||
+                        blob[i] != R.base + (size_t) rs * R.stride) {
+                        F->helper_error = "GLM fixed CPU: ownership or protected RAM source changed";
+                        F->helper_failed.store(true, std::memory_order_release);
+                        ne = 0;   // retire this request with the existing helper failure path, never dereference it
+                        break;
+                    }
+                }
+            }
             if (F->has_helpers()) {
                 const auto& ly = F->L[(size_t) rq->layer];
                 const bool in_win = rq->win_n > 1;
@@ -5396,7 +5671,9 @@ void Glm5Model::fast_service() {
                     const char* v = getenv("STRATA_GLM_HELPER_OVERLAP");
                     return v != nullptr && std::atoi(v) != 0;
                 }();
-                const bool split = ovl && hn > 0 && ne > 0;
+                const bool batch_cpu = F->stage_cpu_batch && in_win && ne > 0 &&
+                                       !F->helper_failed.load(std::memory_order_acquire);
+                const bool split = ovl && hn > 0 && ne > 0 && !batch_cpu;
                 const bool local_ok = !(F->helper_failed.load(std::memory_order_acquire) || (hn > 0 &&
                     !(split ? F->helper.compute_begin(ly.gu_type, ly.d_type, ly.down_off, g.swiglu_exp, hn, helper_keys,
                                                       helper_w, rq->x, ans->part, F->helper_error)
@@ -5411,7 +5688,7 @@ void Glm5Model::fast_service() {
                 }
                 if (ht != nullptr) ht->loc = nt_now();
                 // Quantize on the CPU only when this route actually has CPU fallback.
-                if (ne > 0) {
+                if (ne > 0 && !batch_cpu) {
                     const auto cpu_t0 = std::chrono::steady_clock::now();
                     float cpu_part[4096];
                     fast_cpu_experts(rq->layer, ne, blob, w, rq->x, cpu_part);
@@ -5429,6 +5706,22 @@ void Glm5Model::fast_service() {
                 }
                 F->helper_experts.fetch_add((uint64_t) hn, std::memory_order_relaxed);
                 F->helper_routes.fetch_add(hn > 0, std::memory_order_relaxed);
+                if (batch_cpu) {
+                    if (fixed_n == kWinMax || (fixed_n > 0 && fixed_q[0].cpu.layer != rq->layer)) fixed_flush();
+                    auto& h = fixed_q[fixed_n++];
+                    std::memcpy(&h.cpu, rq, sizeof(*rq));
+                    h.cpu.cpu_mask = 0;
+                    for (int i = 0; i < K; ++i)
+                        if (((cm >> i) & 1u) && F->cpu_owned[(size_t) rq->layer * g.n_expert + rq->ids[i]])
+                            h.cpu.cpu_mask |= 1u << i;
+                    h.cpu.win_rows = 1;   // the existing merged kernel uses this host's pool
+                    h.destination = ans;
+                    h.sequence = next;
+                    h.began = t0;
+                    if (rq->win >= rq->win_n - 1) fixed_flush();
+                    ++next;
+                    continue;
+                }
                 if (hold) {   // the answer once the layer's last window token routed (net_flush)
                     NetHeld& h = nh_q[nh_n++];
                     h.ans = ans;
@@ -5518,6 +5811,7 @@ void Glm5Model::fast_service() {
         F->processed.fetch_add(1, std::memory_order_release);
         // (a held window layer whose last token had nothing off the GPU: its earlier tokens' answers now)
         if (nh_n > 0 && rq->win_n > 1 && rq->win >= rq->win_n - 1) net_flush();
+        if (fixed_n > 0 && rq->win_n > 1 && rq->win >= rq->win_n - 1) fixed_flush();
         ++next;
     }
 }

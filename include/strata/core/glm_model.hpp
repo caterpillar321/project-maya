@@ -641,7 +641,7 @@ public:
     bool fast_warm(std::string& err);                      // load-time: stream every expert into the tiers
     bool fast_cpu_lane_setup(std::string& err);            // STRATA_GLM_CPU_LANE: the pool, its calibration, the split
     bool fast_helper_setup(std::string& err);              // STRATA_GLM_EXPERT_HELPER: complementary GPU cache
-    bool fast_helper_adapt(std::string& err);              // helper-only, at an idle boundary
+    bool fast_helper_adapt(std::string& err, bool stage_refresh = false, int max_swaps = 8);
     void fast_cpu_experts(int il, int ne, const uint8_t* const* blob, const float* w, const float* x, float* out);
     // the same on `pool` with the rows act / hq / ff / dn, or x3 for an EXL3 pack (a verify window's CPU lanes:
     // FastState::win_lane, each with its own rows)
@@ -878,6 +878,8 @@ public:
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
     bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
     bool remote_front_enabled() const { return remote_front_ != nullptr; }
+    /// Explicit idle boundary after prefill, BEFORE generation. Decode windows never reassign stage helpers.
+    bool refresh_stage_helper(std::string& err);
 private:
     std::unique_ptr<GlmRemoteStage> remote_front_;
     bool remote_token(int32_t token, std::string& err);
