@@ -1,0 +1,382 @@
+{
+  "date": "2026-10-29",
+  "quantization_changed": false,
+  "hardware_settings_changed": false,
+  "experiments": {
+    "scratch": {
+      "source": "/home/caterpillar/Agent/maya-scratch2-20261029/results.json",
+      "arms": {
+        "scratch3-before": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                39.0
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 39.0
+            },
+            "code": {
+              "pass_tok_s": [
+                34.2
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.2
+            }
+          },
+          "audit_complete": true,
+          "requests": 9,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        },
+        "scratch2": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                37.7,
+                38.3
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 38.0
+            },
+            "code": {
+              "pass_tok_s": [
+                34.2,
+                34.2
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.2
+            }
+          },
+          "audit_complete": true,
+          "requests": 20,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.36,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.57,
+            "pool_slots": 1475,
+            "main_pinned_ram_gib": 91.98,
+            "main_ram_slots": 7304,
+            "remote_cold_experts": 779,
+            "remote_cold_gib": 9.77,
+            "remote_copies": 3552,
+            "remote_copy_eligible": 7122,
+            "remote_copy_decimal_gb": 47.49
+          }
+        },
+        "scratch3-after": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                39.0
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 39.0
+            },
+            "code": {
+              "pass_tok_s": [
+                34.2
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.2
+            }
+          },
+          "audit_complete": true,
+          "requests": 9,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        }
+      }
+    },
+    "route_ahead": {
+      "source": "/home/caterpillar/Agent/maya-early-route-20261029/results.json",
+      "arms": {
+        "route-off": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                38.9,
+                38.9
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 38.9
+            },
+            "code": {
+              "pass_tok_s": [
+                34.2,
+                33.6
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 33.900000000000006
+            }
+          },
+          "audit_complete": true,
+          "requests": 20,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        },
+        "route-on": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                39.4,
+                39.3
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 39.349999999999994
+            },
+            "code": {
+              "pass_tok_s": [
+                34.6,
+                34.0
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.3
+            }
+          },
+          "audit_complete": true,
+          "requests": 20,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        }
+      }
+    },
+    "cpu_cost": {
+      "source": "/home/caterpillar/Agent/maya-mtp-copycost-20261029/results.json",
+      "arms": {
+        "cost20": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                36.6,
+                36.7
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 36.650000000000006
+            },
+            "code": {
+              "pass_tok_s": [
+                33.4,
+                33.3
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 33.349999999999994
+            }
+          },
+          "audit_complete": true,
+          "requests": 18,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        },
+        "cost24": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                35.5,
+                35.6
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 35.55
+            },
+            "code": {
+              "pass_tok_s": [
+                31.5,
+                31.7
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 31.6
+            }
+          },
+          "audit_complete": true,
+          "requests": 18,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        },
+        "cost16-after": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                39.3
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 39.3
+            },
+            "code": {
+              "pass_tok_s": [
+                34.7
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.7
+            }
+          },
+          "audit_complete": true,
+          "requests": 9,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        }
+      }
+    },
+    "trip_cost": {
+      "source": "/home/caterpillar/Agent/maya-mtp-rtt-20261029/results.json",
+      "arms": {
+        "rtt20": {
+          "metrics": {
+            "chat": {
+              "pass_tok_s": [
+                39.3,
+                39.1
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 39.2
+            },
+            "code": {
+              "pass_tok_s": [
+                34.6,
+                34.4
+              ],
+              "arithmetic_mean_of_reported_pass_tok_s": 34.5
+            }
+          },
+          "audit_complete": true,
+          "requests": 20,
+          "startup_memory": {
+            "prefill_borrow_mib": 9671,
+            "gpu_before_pool_gib": 11.47,
+            "gpu_total_gib": 31.44,
+            "expert_pool_gib": 18.46,
+            "pool_slots": 1466,
+            "main_pinned_ram_gib": 91.95,
+            "main_ram_slots": 7302,
+            "remote_cold_experts": 788,
+            "remote_cold_gib": 9.88,
+            "remote_copies": 3543,
+            "remote_copy_eligible": 7121,
+            "remote_copy_decimal_gb": 47.37
+          }
+        }
+      }
+    }
+  },
+  "selected": {
+    "engine": "maya-early-route-20261029",
+    "engine_sha256": "b59380b34f7311c8225f6e93430327d132f634c274b3dc40a13208acfec4b2d9",
+    "MTP_FIXED": 1,
+    "WIN_SCRATCH_ROWS": 3,
+    "WIN_FETCH_REUSE": 1,
+    "WIN_ROUTE_AHEAD": 1,
+    "NET_COPY_MS": 0.16,
+    "NET_COPY_RTT": 0.35,
+    "NET_COPY_RTT_SHARED": 0.1
+  },
+  "production_status": {
+    "phase": "active",
+    "restored_on_failure": false,
+    "config": "/home/caterpillar/fn/maya-config/iq4-kohane5200.json",
+    "engine": "/home/caterpillar/fn/bin-test/maya-early-route-20261029",
+    "smoke": {
+      "id": "chatcmpl-717704c027024951953cc3f9",
+      "object": "chat.completion",
+      "created": 1793248770,
+      "model": "glm-5.3-flash",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "# 피보나치 수열\n\n**피보나치 수열**은 앞의 두 수를 더해 다음 수를 만드"
+          },
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 28,
+        "completion_tokens": 32,
+        "total_tokens": 60,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 28,
+        "prompt_ms": 992.3,
+        "prompt_per_token_ms": 35.439,
+        "prompt_per_second": 28.2,
+        "predicted_n": 32,
+        "predicted_ms": 815.4,
+        "predicted_per_token_ms": 25.481,
+        "predicted_per_second": 39.2,
+        "draft_n": 16,
+        "draft_n_accepted": 15
+      }
+    }
+  },
+  "achieved_50_tok_s": false
+}
