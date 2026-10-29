@@ -2159,8 +2159,12 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         }
     }
     if (have_local && !F->helper.reserve(F->n_keys, requested, err)) return false;
-    std::stable_sort(ranked.begin(), ranked.end(), [&](int a, int b) { return F->usage[(size_t) a] > F->usage[(size_t) b]; });
+    if (stage_windows_enabled_)
+        glm_rank_fixed_helper(ranked, F->usage, profile_, g_.n_expert);
+    else
+        std::stable_sort(ranked.begin(), ranked.end(), [&](int a, int b) { return F->usage[(size_t) a] > F->usage[(size_t) b]; });
     int resident = 0;
+    std::vector<int> helper_layers(F->L.size(), 0);
     if (have_local) for (int key : ranked) {
         const int il = key / g_.n_expert, e = key % g_.n_expert;
         auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
@@ -2171,6 +2175,13 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         if (!F->helper.insert(key, host, F->L[(size_t) il].blob, R.stride, err)) return false;
         if (F->helper.integrated()) R.st[(size_t) rs] = FastState::kRHelper;
         ++resident;
+        ++helper_layers[(size_t) il];
+    }
+    if (stage_windows_enabled_ && have_local) {
+        std::fprintf(stderr, "glm stage fixed helper: usage then profile ranking; layer:experts");
+        for (int il = l0_; il < lt_; ++il)
+            if (F->L[(size_t) il].moe) std::fprintf(stderr, " %d:%d", il, helper_layers[(size_t) il]);
+        std::fprintf(stderr, "\n");
     }
     const char* global_net = getenv("STRATA_GLM_NET_HELPER");
     const std::string net_spec = split_net.enabled ? split_net.endpoints[(size_t) part_]
