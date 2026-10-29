@@ -21,6 +21,7 @@
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/glm_dflash.hpp"
+#include "strata/core/glm_remote_stage.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/exl3.hpp"
 #include "strata/kernels/sampler.hpp"
@@ -858,6 +859,38 @@ public:
     /// position at +T; window_commit(n) keeps the first n tokens (1 <= T <= kWinMax).
     bool window(const int32_t* tokens, int T, int32_t* out, std::string& err,
                 const strata::kernels::SamplerParams* sp = nullptr);
+    /// Opt in BEFORE load_pack: reserve a private batched window and recurrent-state backup even on a front
+    /// stage without NextN. A stage is one local trunk GPU, optionally with its existing expert helpers.
+    bool enable_stage_windows(std::string& err);
+    struct StageWindowResult {
+        std::vector<float> residual;   // T * hc * n_embd, FP32; no precision conversion at the boundary
+        std::vector<int32_t> picks;    // T on the final stage, empty on a front stage
+        std::vector<float> logits;    // optional diagnostic capture, T * n_vocab on the final stage
+    };
+    /// A local stage's tentative T-row pass. Front stages embed tokens; later stages require exactly
+    /// T*hc*n_embd input floats. Commit (or reset) is mandatory before another pass. GPU failures poison the
+    /// stage until reset; invalid arguments leave it untouched. Uses window()'s batched kernels/retry path.
+    bool stage_window(const int32_t* tokens, int T, const float* input, size_t input_floats,
+                      StageWindowResult& result, std::string& err,
+                      const strata::kernels::SamplerParams* sp = nullptr, bool capture_logits = false);
+    bool stage_commit(int keep, std::string& err);
+    bool stage_window_pending() const { return stage_window_pending_; }
+    bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
+    bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
+    bool remote_front_enabled() const { return remote_front_ != nullptr; }
+private:
+    std::unique_ptr<GlmRemoteStage> remote_front_;
+    bool remote_token(int32_t token, std::string& err);
+    bool remote_prefill(const std::vector<int32_t>& tokens, std::string& err);
+    struct StageWindowIO {
+        const float* input = nullptr;
+        StageWindowResult* result = nullptr;
+        bool capture_logits = false;
+    };
+    bool stage_windows_enabled_ = false, stage_window_pending_ = false, stage_failed_ = false;
+    bool window_impl(const int32_t* tokens, int T, int32_t* out, std::string& err,
+                     const strata::kernels::SamplerParams* sp, StageWindowIO* stage);
+public:
     /// The same window PIPELINED over a split: the tokens go through the token path one after another, each part
     /// starting token t + 1 as soon as it has handed token t on, so the parts work on different tokens at once (a
     /// window costs about one token's pass plus (T - 1) of the slowest part's, where window() runs the parts one after

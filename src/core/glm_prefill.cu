@@ -4479,6 +4479,11 @@ bool Glm5Model::dump_state(const std::string& path) {
 // ---------------------------------------------------------------- the prompt
 bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, int32_t next_token) {
     err.clear();
+    if (stage_window_pending_ || stage_failed_) {
+        err = "glm stage: commit or reset before prefill";
+        return false;
+    }
+    if (remote_front_) return remote_prefill(tokens, err);
     prefill_next_ = next_token;
     if (fast_ == nullptr || tokens.empty()) return false;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())   // (a tail lent to the vision encoder: the

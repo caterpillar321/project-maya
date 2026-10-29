@@ -386,7 +386,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # already links `strata_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp src/core/net_helper.cpp
+  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp src/core/net_helper.cpp src/core/glm_remote_stage.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/glm_model.cu src/core/glm_fast_path.cu src/core/glm_prefill.cu src/core/glm_multi.cu src/core/glm_rows.cu
     src/core/glm_window.cu src/core/glm_dflash.cu src/core/glm_mtp.cu)
@@ -453,6 +453,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   add_executable(maya-helperd src/program/helperd.cpp)
   target_include_directories(maya-helperd PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(maya-helperd PRIVATE strata_engine ${_strata_gpu_runtime_target})
+  add_executable(maya-stage-worker src/program/stage_worker.cpp)
+  target_include_directories(maya-stage-worker PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(maya-stage-worker PRIVATE strata_engine ${_strata_gpu_runtime_target})
+  add_executable(glm_remote_model_test EXCLUDE_FROM_ALL tests/glm_remote_model_test.cpp)
+  target_include_directories(glm_remote_model_test PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(glm_remote_model_test PRIVATE strata_engine ${_strata_gpu_runtime_target})
   add_executable(maya src/program/generate.cpp)
   target_include_directories(maya PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(maya PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
@@ -1173,6 +1179,13 @@ if(STRATA_BUILD_TESTS)
   target_include_directories(expert_slot_profile_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME expert_slot_profile_test COMMAND expert_slot_profile_test)
   add_executable(glm_helper_ownership_test tests/glm_helper_ownership_test.cpp)
+  if(UNIX)
+    add_executable(glm_remote_stage_test tests/glm_remote_stage_test.cpp src/core/glm_remote_stage.cpp)
+    target_include_directories(glm_remote_stage_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(glm_remote_stage_test PRIVATE Threads::Threads)
+    add_test(NAME glm_remote_stage_test COMMAND glm_remote_stage_test)
+    set_tests_properties(glm_remote_stage_test PROPERTIES TIMEOUT 30)
+  endif()
   target_include_directories(glm_helper_ownership_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME glm_helper_ownership_test COMMAND glm_helper_ownership_test)
   add_executable(glm_split_net_plan_test tests/glm_split_net_plan_test.cpp)

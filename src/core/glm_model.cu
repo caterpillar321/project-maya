@@ -841,6 +841,15 @@ bool Glm5Model::load(const std::string& gguf_path, int64_t max_ctx, std::string&
 void Glm5Model::reset() {
     if (!loaded_) return;
     cudaSetDevice(dev_);
+    stage_window_pending_ = false;
+    stage_failed_ = false;
+    if (remote_front_ && remote_front_->ready()) {
+        std::string remote_err;
+        if (!remote_front_->reset(remote_err)) {
+            stage_failed_ = true;
+            std::fprintf(stderr, "glm stage reset: %s\n", remote_err.c_str());
+        }
+    }
     // The state zeroed on the stream that reads it next, and waited for: the fast path's streams are non-blocking, so
     // nothing orders a legacy-stream memset before them. Windows' HIP runtime submits queued work only when the host
     // waits on it - the next conversation's prompt read the previous one's state, and the memset landed in the middle
@@ -1003,6 +1012,10 @@ Glm5Model::KvStreamStats Glm5Model::kv_stream_stats() const {
 
 bool Glm5Model::forward(const std::vector<int32_t>& tokens, std::vector<float>& logits_out,
                         std::string& err) {
+    if (stage_window_pending_ || stage_failed_) {
+        err = "glm stage: commit or reset before forward";
+        return false;
+    }
     if (!loaded_) {
         err = "glm5_model: not loaded";
         return false;
@@ -1952,6 +1965,27 @@ bool Glm5Model::load_pack_env(const std::string& pack_dir, int64_t max_ctx, std:
 
 bool Glm5Model::load_pack_place(const std::string& pack_dir, int64_t max_ctx, std::string& err,
                                 const std::string& layer_split) {
+    if (const char* endpoint = getenv("STRATA_GLM_REMOTE_FRONT"); endpoint && *endpoint) {
+        const char* cut_text = getenv("STRATA_GLM_REMOTE_CUT");
+        const char* seq = getenv("STRATA_GLM_SEQS");
+        const char* net = getenv("STRATA_GLM_NET_HELPER");
+        const char* split = getenv("STRATA_GLM_SPLIT_NET");
+        if (!cut_text || std::strlen(cut_text) > 2 || std::strspn(cut_text, "0123456789") != std::strlen(cut_text) ||
+            std::atoi(cut_text) < 1 || std::atoi(cut_text) >= g_.n_layers || !dflash_path_.empty() ||
+            (seq && std::atoi(seq) != 1) || (net && *net) || (split && std::strcmp(split, "0") != 0)) {
+            err = "remote front needs REMOTE_CUT in [1,44], one sequence, no DFlash/NET_HELPER/SPLIT_NET";
+            return false;
+        }
+        const int cut = std::atoi(cut_text);
+        if (!enable_stage_windows(err)) return false;
+        remote_front_ = std::make_unique<GlmRemoteStage>();
+        if (!load_pack(pack_dir, max_ctx, err, 0, cut, 0)) return false;
+        stageproto::Info info;
+        if (!stage_info(cut, info, err)) return false;
+        std::fprintf(stderr, "glm remote stage: CUDA0 layers [%d,%d), awaiting front worker at %s; native T2/T3\n",
+                     cut, g_.n_layers, endpoint);
+        return remote_front_->open(endpoint, info, err);
+    }
     GlmSplitNetPlan split_net;
     if (!read_glm_split_net_plan(layer_split, g_.n_layers, split_net, err)) return false;
     if (split_net.enabled) {
@@ -3387,7 +3421,7 @@ bool strata::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max
     }
     // (the pipelined speculative decode is a two-part one: a longer split leaves the block unloaded; one GPU loads it
     // for the one-GPU MTP decode - glm_mtp.cu: by default on the Strix / Gorgon Halo APUs)
-    const bool mtp_one = l0_ == 0 && mtp_decode_wanted(dev_, n_parts_);
+    const bool mtp_one = (l0_ == 0 || remote_front_) && mtp_decode_wanted(dev_, n_parts_);
     if (fast_mode_ && l1_ == g_.n_layers && (g_.nextn > 0 || mtp_extra) && getenv("STRATA_GLM_NO_MTP") == nullptr &&
         (l0_ > 0 || getenv("STRATA_GLM_MTP") != nullptr || mtp_one)) {   // any split: the speculative decode, 2+ parts
         if (!load_mtp(gfs, err)) return false;

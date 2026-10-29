@@ -1021,9 +1021,12 @@ bool Glm5Model::fast_setup(std::string& err) {
     size_t win_free0 = 0, win_total = 0;
     cudaMemGetInfo(&win_free0, &win_total);
     if (dflash_on_ && !win_reserve(err)) return false;
+    // A remote/local front stage has no drafter, but its tentative window still needs an independently owned
+    // recurrent backup. Reserve it before the expert pool, just like the native MTP coordinator's window.
+    if (stage_windows_enabled_ && !win_reserve(err)) return false;
     // the one-GPU MTP decode (glm_mtp.cu; load_pack loaded the NextN block for it): the same window, the NextN cache
     // fill's rows, the draft head and the chain's token_embd - before the pool too; without them, token by token
-    if (mtp_il_ >= 0 && split_next_ == nullptr && l0_ == 0 && !dflash_on_ && mtp_decode_wanted(dev_, n_parts_)) {
+    if (mtp_il_ >= 0 && split_next_ == nullptr && (l0_ == 0 || remote_front_) && !dflash_on_ && mtp_decode_wanted(dev_, n_parts_)) {
         std::string werr;
         if (win_reserve(werr) && mtp_cache_setup(werr)) {
             mtp_dec_ = true;
@@ -1159,7 +1162,12 @@ bool Glm5Model::fast_setup(std::string& err) {
         // --expert-cache auto: the budget checked once written, before the prompt path sizes its chunk from it
         pool_check(floor_b, stride_max, all_b);
         // the batched prompt path: its sizes (it borrows the pool's tail, see below)
-        if (!prefill_setup(err)) return false;
+        // The experimental stage transport currently prefills through bounded verification windows. Reserving
+        // the unused 32K-token prefill staging/loan here can consume several GiB of the front host's RAM and
+        // needlessly shrink its permanent expert pool. Large-chunk remote prefill must opt into its own budget.
+        if (!stage_windows_enabled_ && !prefill_setup(err)) return false;
+        if (stage_windows_enabled_)
+            std::fprintf(stderr, "glm stage: bounded-window prefill; legacy chunk staging is not reserved\n");
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
         {
@@ -1677,7 +1685,9 @@ bool Glm5Model::fast_setup(std::string& err) {
                 remaining_layers = g.n_layers - g.dense_lead + (getenv("STRATA_GLM_NO_MTP") ? 0 : g.nextn);
             }
             // the last half takes everything left (one device: the NextN block, counted above, is not loaded)
-            budget = l1_ >= g.n_layers ? remaining
+            // A standalone front stage is the only trunk on its host. Do not divide its RAM budget by layers
+            // owned by the other host. Ordinary in-process split parts retain the original shared budget.
+            budget = (l1_ >= g.n_layers || (stage_windows_enabled_ && n_parts_ == 1)) ? remaining
                                        : std::min<int64_t>(remaining, (int64_t) ((double) remaining * (double) n_moe /
                                                                                  (double) std::max(1, remaining_layers)));
             // a later part: no more than is free now, less what is still to come and half the headroom (a parallel
@@ -1778,6 +1788,17 @@ bool Glm5Model::fast_setup(std::string& err) {
             std::fprintf(stderr, "glm RAM class override: planned %.3f -> %.3f MiB (no budget increase)\n",
                          (double) before / 1048576.0, (double) after / 1048576.0);
             cls_n.swap(requested);
+        }
+        if (stage_windows_enabled_) {
+            int64_t planned = 0;
+            for (size_t c = 0; c < cls_n.size(); ++c) planned += cls_n[c] * (int64_t) cls_stride[c];
+            const int64_t available = avail_ram_now();
+            if (available > 0 && planned > std::max<int64_t>(0, available - head_b)) {
+                err = "stage RAM tier needs " + std::to_string(planned >> 20) +
+                      " MiB, but only " + std::to_string(std::max<int64_t>(0, available - head_b) >> 20) +
+                      " MiB remains after RAM_HEADROOM_GB; reduce RAM_GB before pinning";
+                return false;
+            }
         }
         // parallel load: take the planned size from the budget and let the next part plan; every part pins once all
         // have planned (a later part's measurement then sees no tier half pinned)
@@ -2597,6 +2618,10 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
 
 bool Glm5Model::fast_helper_adapt(std::string& err) {
     FastState* F = fast_;
+    // Stage sessions use the agreed fixed expert ownership. Moving an expert between the trunk and helper
+    // changes its activation/reduction path, so a reset/replay can otherwise change the verifier's arithmetic.
+    // The legacy single-trunk policy is unchanged; a future stage replan needs an explicit synchronized epoch.
+    if (stage_windows_enabled_) return true;
     if (F->helper.device() < 0 || F->bg_hold) return true;
     auto primary = F->slot_of;
     for (const auto& m : F->bg) if (m.up) primary[(size_t) m.key] = m.vslot;
@@ -7059,6 +7084,11 @@ bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
 }
 
 bool Glm5Model::fast_token(int32_t token, std::string& err) {
+    if (stage_window_pending_ || stage_failed_) {
+        err = "glm stage: commit or reset before token decode";
+        return false;
+    }
+    if (remote_front_) return remote_token(token, err);
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     const int64_t p = pos_++;
@@ -8172,6 +8202,11 @@ void Glm5Model::snap_pool_copy(bool restore) {
 }
 
 bool Glm5Model::snapshot_save() {
+    if (stage_window_pending_ || stage_failed_) return false;
+    if (remote_front_) {
+        std::string err;
+        if (!remote_front_->save(pos_, err)) { std::fprintf(stderr, "remote snapshot save: %s\n", err.c_str()); return false; }
+    }
     ckpt_join();   // (ckpt_save_snapshot may still be copying the snapshot this overwrites)
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr) return false;
@@ -8205,6 +8240,11 @@ bool Glm5Model::snapshot_save() {
 }
 
 bool Glm5Model::snapshot_restore() {
+    if (stage_window_pending_ || stage_failed_) return false;
+    if (remote_front_) {
+        std::string err;
+        if (!remote_front_->restore(snap_pos_, err)) { std::fprintf(stderr, "remote snapshot restore: %s\n", err.c_str()); return false; }
+    }
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
         if (m->fast_ == nullptr || m->snap_pos_ < 0) return false;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
@@ -8249,6 +8289,7 @@ void Glm5Model::ckpt_pool_copy(int64_t pos, float* host, bool restore) {
 }
 
 bool Glm5Model::ckpt_save_snapshot(int slot, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
     ckpt_join();
     if (slot < 0) {
         err = "checkpoint: no slot";
@@ -8318,6 +8359,7 @@ bool Glm5Model::ckpt_save_snapshot(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_save(int slot, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
     ckpt_join();
     if (slot < 0) {
         err = "checkpoint: no slot";
@@ -8367,6 +8409,7 @@ bool Glm5Model::ckpt_save(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_restore(int slot, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support checkpoint slots"; return false; }
     ckpt_join();
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
         if (m->fast_ == nullptr || slot < 0 || (int) m->ckpt_pos_.size() <= slot || m->ckpt_pos_[(size_t) slot] < 0 ||
@@ -8438,6 +8481,7 @@ std::vector<std::pair<float*, int64_t>> slot_dsa_runs(const Glm5Geometry& g, boo
 }  // namespace
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support persisted conversation slots"; return 0; }
     std::vector<Glm5Model*> halves;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr || m->snap_pos_ < 0 || m->snap_pos_ != snap_pos_) {
@@ -8514,6 +8558,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
 }
 
 bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support persisted conversation slots"; return false; }
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
     dflash_reset();   // another conversation's state: the drafter's cached positions are not its
     std::ifstream f(path, std::ios::binary);
@@ -8615,6 +8660,7 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
 // buffer exactly first (slot_dsa_runs is read-only, so the layout can be taken before any byte moves),
 // and any allocation failure is caught (the caller falls back to the disk path).
 uint64_t Glm5Model::slot_save(std::vector<uint8_t>& data, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support conversation slots"; return 0; }
     std::vector<Glm5Model*> halves;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr || m->snap_pos_ < 0 || m->snap_pos_ != snap_pos_) {
@@ -8709,6 +8755,7 @@ uint64_t Glm5Model::slot_save(std::vector<uint8_t>& data, std::string& err) {
 }
 
 bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err) {
+    if (remote_front_) { err = "remote stages do not yet support conversation slots"; return false; }
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
     dflash_reset();   // another conversation's state: the drafter's cached positions are not its
     size_t pos = 0;

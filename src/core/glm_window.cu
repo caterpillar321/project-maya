@@ -1060,6 +1060,172 @@ bool Glm5Model::fast_window_layers(int64_t p0, int T, std::string& err) {
 
 bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& err,
                        const strata::kernels::SamplerParams* sp) {
+    if (stage_window_pending_ || stage_failed_) {
+        err = "glm window: commit or reset the outstanding stage window first";
+        return false;
+    }
+    if (remote_front_) {
+        std::vector<float> residual;
+        if (!remote_front_->verify(pos_, tokens, T, residual, err)) { stage_failed_ = true; return false; }
+        StageWindowResult result;
+        if (!stage_window(tokens, T, residual.data(), residual.size(), result, err, sp)) {
+            stage_failed_ = true;
+            return false;
+        }
+        if ((int) result.picks.size() != T) {
+            err = "remote stage coordinator has no output head"; stage_failed_ = true; return false;
+        }
+        std::copy(result.picks.begin(), result.picks.end(), out);
+        return true;
+    }
+    return window_impl(tokens, T, out, err, sp, nullptr);
+}
+
+bool Glm5Model::stage_info(int cut, stageproto::Info& info, std::string& err) const {
+    err.clear();
+    if (!loaded_ || !pack_ || exl3_ || g_.hc != 4 || g_.n_embd > 4096 || cut < 1 || cut >= g_.n_layers) {
+        err = "stage protocol requires a loaded native GLM pack and a valid two-stage boundary"; return false;
+    }
+    uint64_t hash = stageproto::manifest_hash(pack_dir_, err);
+    if (!err.empty()) return false;
+    const auto mix = [&](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) hash = (hash ^ b[i]) * 1099511628211ull;
+    };
+    const int shape[] = {g_.n_head, g_.q_lora, g_.kv_lora, g_.qk_nope, g_.v_head, g_.kda_head_dim, g_.d_conv,
+                         g_.idx_heads, g_.idx_key, g_.idx_top_k, g_.idx_kpool, g_.idx_select_tail,
+                         g_.sinkhorn_iters, g_.n_ff_exp, g_.n_shared, g_.n_ff_dense, g_.dense_lead, g_.norm_w};
+    const float scalars[] = {g_.kda_lb, g_.hc_eps, g_.norm_eps, g_.w_scale, g_.swiglu_exp, g_.swiglu_shexp};
+    mix(shape, sizeof(shape)); mix(scalars, sizeof(scalars));
+    mix(g_.n_head_kv.data(), g_.n_head_kv.size() * sizeof(int));
+    mix(g_.indexer_full.data(), g_.indexer_full.size() * sizeof(int));
+    info = {};
+    info.manifest = hash; info.context = max_ctx_; info.cut = cut; info.layers = g_.n_layers;
+    info.embd = g_.n_embd; info.hc = g_.hc; info.vocab = g_.n_vocab;
+    info.experts = g_.n_expert; info.top_k = g_.n_exp_used; info.nextn = g_.nextn;
+    info.kv_bits = kv_int8() ? 8 : 32; info.kv_resident = (uint32_t) kv_resident();
+    return true;
+}
+
+bool Glm5Model::window_logits(std::vector<float>& logits, std::string& err) const {
+    const Glm5Model* tail = this;
+    while (tail->split_next_) tail = tail->split_next_.get();
+    if (!tail->fast_ || tail->l1_ != g_.n_layers || tail->fast_->win.T < 1 || stage_failed_) {
+        err = "glm window logits: no completed uncommitted window"; return false;
+    }
+    cudaSetDevice(tail->dev_);
+    logits.resize((size_t) tail->fast_->win.T * g_.n_vocab);
+    return glmfast::cuda_ok(cudaMemcpy(logits.data(), tail->fast_->win.logits, logits.size() * sizeof(float),
+                                       cudaMemcpyDeviceToHost), "glm window diagnostic logits", err);
+}
+
+bool Glm5Model::remote_token(int32_t token, std::string& err) {
+    const int64_t p0 = pos_;
+    FastState* F = fast_;
+    cudaSetDevice(dev_);
+    if (mtp_dec_ && !mtp_fill_prev(token, p0, err)) return false;
+    int32_t out = -1;
+    if (!window(&token, 1, &out, err) || !window_commit(1, err)) return false;
+    auto& W = F->win;
+    if (!glmfast::cuda_ok(cudaMemcpyAsync(sc_ + sc_logits, W.logits, (size_t) g_.n_vocab * sizeof(float),
+                                         cudaMemcpyDeviceToDevice, F->cs), "remote stage last logits", err) ||
+        !glmfast::cuda_ok(cudaMemcpyAsync(F->head_x, W.head_x, (size_t) g_.n_embd * sizeof(float),
+                                         cudaMemcpyDeviceToDevice, F->cs), "remote stage last hidden", err) ||
+        !glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "remote stage token completion", err)) return false;
+    last_tok_ = out; mtp_hx_pos_ = p0;
+    return true;
+}
+
+bool Glm5Model::remote_prefill(const std::vector<int32_t>& tokens, std::string& err) {
+    // Correctness-first remote path: bounded batched verification windows preserve both stage states and NextN's
+    // cache. This is not yet the large tensor-core prefill path; report its TTFT separately, never silently mix it
+    // into a production long-prompt claim. Full-chunk remote prefill will use the same stage ownership contract.
+    if (tokens.empty()) return false;
+    if ((int64_t) tokens.size() > max_ctx_ - pos_) { err = "remote prefill exceeds context"; return false; }
+    FastState* F = fast_;
+    for (size_t at = 0; at < tokens.size();) {
+        const int T = (int) std::min<size_t>(kWinMax, tokens.size() - at);
+        const int64_t p0 = pos_;
+        cudaSetDevice(dev_);
+        if (mtp_dec_ && !mtp_fill_prev(tokens[at], p0, err)) return false;
+        std::vector<int32_t> out((size_t) T);
+        if (!window(tokens.data() + at, T, out.data(), err) || !window_commit(T, err)) return false;
+        auto& W = F->win;
+        if (mtp_dec_ && T > 1 && !mtp_cache_rows(p0, T - 1, W.head_x, tokens.data() + at + 1, err)) return false;
+        if (!glmfast::cuda_ok(cudaMemcpyAsync(F->head_x, W.head_x + (size_t) (T - 1) * g_.n_embd,
+                                             (size_t) g_.n_embd * sizeof(float), cudaMemcpyDeviceToDevice, F->cs),
+                              "remote prefill last hidden", err) ||
+            !glmfast::cuda_ok(cudaMemcpyAsync(sc_ + sc_logits, W.logits + (size_t) (T - 1) * g_.n_vocab,
+                                             (size_t) g_.n_vocab * sizeof(float), cudaMemcpyDeviceToDevice, F->cs),
+                              "remote prefill last logits", err) ||
+            !glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "remote prefill completion", err)) return false;
+        last_tok_ = out.back(); mtp_hx_pos_ = p0 + T - 1;
+        at += T;
+        if (prefill_progress && !prefill_progress((int64_t) at, (int64_t) tokens.size())) {
+            err = "remote prefill cancelled"; return false;
+        }
+    }
+    return true;
+}
+
+bool Glm5Model::enable_stage_windows(std::string& err) {
+    if (loaded_ || fast_ != nullptr) {
+        err = "glm stage: enable before loading weights";
+        return false;
+    }
+    stage_windows_enabled_ = true;
+    return true;
+}
+
+bool Glm5Model::stage_window(const int32_t* tokens, int T, const float* input, size_t input_floats,
+                            StageWindowResult& result, std::string& err,
+                            const strata::kernels::SamplerParams* sp, bool capture_logits) {
+    if (!stage_windows_enabled_ || fast_ == nullptr || split_next_ || n_parts_ != 1 || seq_count() != 1 ||
+        dflash_on_ || stage_window_pending_ || stage_failed_) {
+        err = "glm stage: needs an enabled, idle single local trunk (no DFlash or concurrent sequences)";
+        return false;
+    }
+    if (tokens == nullptr || T < 1 || T > kWinMax || pos_ < 0 || pos_ > max_ctx_ - T) {
+        err = "glm stage: invalid token window or context range";
+        return false;
+    }
+    const size_t required = (size_t) T * g_.hc * g_.n_embd;
+    if ((l0_ == 0 && (input != nullptr || input_floats != 0)) ||
+        (l0_ != 0 && (input == nullptr || input_floats != required))) {
+        err = "glm stage: front stages embed tokens; later stages require a full FP32 residual window";
+        return false;
+    }
+    for (int t = 0; t < T; ++t) {
+        if (tokens[t] < 0 || tokens[t] >= g_.n_vocab || image_row(pos_ + t) != nullptr) {
+            err = "glm stage: invalid token or unsupported image row";
+            return false;
+        }
+    }
+    if (capture_logits && l1_ != g_.n_layers) {
+        err = "glm stage: only the last stage has logits";
+        return false;
+    }
+    StageWindowIO io{input, &result, capture_logits};
+    std::vector<int32_t> picks((size_t) T, -1);
+    stage_window_pending_ = true;
+    const bool ok = window_impl(tokens, T, picks.data(), err, sp, &io);
+    if (!ok) {
+        stage_failed_ = true;
+        result = {};
+    }
+    return ok;
+}
+
+bool Glm5Model::stage_commit(int keep, std::string& err) {
+    if (!stage_window_pending_ || stage_failed_) {
+        err = "glm stage: no successful tentative window to commit";
+        return false;
+    }
+    return window_commit(keep, err, true);
+}
+
+bool Glm5Model::window_impl(const int32_t* tokens, int T, int32_t* out, std::string& err,
+                            const strata::kernels::SamplerParams* sp, StageWindowIO* stage) {
     if (fast_ == nullptr || T < 1 || T > kWinMax) {
         err = "glm window: needs the fast path and 1.." + std::to_string(kWinMax) + " tokens";
         return false;
@@ -1067,16 +1233,21 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     const Glm5Geometry& g = g_;
     const int E = g.n_embd;
     const size_t hcE = (size_t) g.hc * E;
+    const bool have_head = stage == nullptr || l1_ == g.n_layers;
     const int64_t p0 = pos_;
     if (p0 + T > max_ctx_) {
         err = "glm window: past the context";
         return false;
     }
     static const bool hprof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
-    static const bool audit = [] {
+    static const bool audit_enabled = [] {
         const char* v = getenv("STRATA_GLM_WIN_AUDIT");
         return v != nullptr && std::atoi(v) != 0;
     }();
+    // On the remote coordinator, count the SAME verification windows as decode_mtp's phase timer. This excludes
+    // T1/plain and bounded prefill passes: subtracting this local span from MTP verify then measures the exposed
+    // front/transport/coordinator time without mixing prompt windows into the denominator.
+    const bool audit = audit_enabled && (!remote_front_ || sp != nullptr);
     using hclk = std::chrono::steady_clock;
     auto h0 = hclk::now();
     const auto audit_start = h0;
@@ -1093,7 +1264,7 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     // between tokens: every device idle, the tiers' edits in; the recurrent states saved (window_commit restores them)
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         cudaSetDevice(m->dev_);
-        cudaStreamSynchronize(m->fast_->cs);
+        if (!glmfast::cuda_ok(cudaStreamSynchronize(m->fast_->cs), "glm window prepare sync", err)) return false;
         if (!m->win_alloc(kWinMax, err)) return false;
         if (!m->fast_boundary(err)) return false;
         // (a window of one token keeps it: nothing to restore)
@@ -1140,6 +1311,13 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     {
         FastState* F = fast_;
         auto& W = F->win;
+        if (F->win_trace) F->win_trace->begin_attempt(attempt, W.per_token, F->cs);
+        if (stage != nullptr && stage->input != nullptr) {
+            if (!glmfast::cuda_ok(cudaMemcpyAsync(W.R[0], stage->input, (size_t) T * hcE * sizeof(float),
+                                                 cudaMemcpyHostToDevice, F->cs), "glm stage residual input", err))
+                return false;
+            if (F->win_trace) F->win_trace->mark(-1, "stage_input", -1, F->cs);
+        } else {
         const ggml_type_traits* tt = ggml_get_type_traits((ggml_type) pack_emb_type_);
         if (tt == nullptr || tt->to_float == nullptr || pack_emb_src_ == nullptr) {
             err = "glm window: no embedding dequantizer";
@@ -1150,11 +1328,11 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
             tt->to_float(pack_emb_src_ + (size_t) tokens[t] * ggml_row_size((ggml_type) pack_emb_type_, E), row, E);
             if (const float* img = image_row(p0 + t)) std::memcpy(row, img, (size_t) E * sizeof(float));
         }
-        if (F->win_trace) F->win_trace->begin_attempt(attempt, W.per_token, F->cs);
         cudaMemcpyAsync(W.emb, W.emb_h, (size_t) T * E * sizeof(float), cudaMemcpyHostToDevice, F->cs);
         for (int t = 0; t < T; ++t)
             gf::embed_streams(W.emb + (size_t) t * E, W.R[0] + (size_t) t * hcE, E, F->cs);
         if (F->win_trace) F->win_trace->mark(-1, "embedding", -1, F->cs);
+        }
     }
     if (!fast_window_layers(p0, T, err)) return false;
     // each later part: the rows cross over through the previous part's pinned buffer, ordered on the devices
@@ -1176,6 +1354,7 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     FastState* FT = tail->fast_;
     auto& WT = FT->win;
     cudaSetDevice(tail->dev_);
+    if (have_head) {
     for (int t = 0; t < T; ++t)
         gf::head_prep(WT.R[WT.out] + (size_t) t * hcE, tail->w_.at("output_norm.weight"), g.norm_eps, E,
                       WT.head_x + (size_t) t * E, (uint8_t*) WT.head_xq + (size_t) t * WT.xq_s, FT->cs);
@@ -1199,6 +1378,7 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     }
     cudaMemcpyAsync(WT.tok_h, WT.tok, (size_t) T * sizeof(int), cudaMemcpyDeviceToHost, FT->cs);
     if (FT->win_trace) FT->win_trace->mark(-1, "head_and_pick", -1, FT->cs);
+    }
     hlap(WH.h_enqueue);
     // every part done (their captures for the drafter too)
     bool clash = false;
@@ -1218,6 +1398,10 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         }
     }
     if (fast_->win_trace) fast_->win_trace->collect(clash && attempt == 0, trace_sync_ok && gf::launch_errors() == 0);
+    if (!trace_sync_ok) {
+        err = "glm window: stage completion synchronization failed";
+        return false;
+    }
     if (audit) {
         ++WH.audit_attempts;
         const double elapsed = audit_ms(attempt_start);
@@ -1246,6 +1430,10 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         cudaSetDevice(dev_);
         continue;
     }
+    if (clash) {
+        err = "glm window: scratch clash persisted after replay";
+        return false;
+    }
     break;
     }
     const cudaError_t e = cudaGetLastError();
@@ -1261,7 +1449,24 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     {
         const Glm5Model* last = this;
         while (last->split_next_) last = last->split_next_.get();
-        for (int t = 0; t < T; ++t) out[t] = last->fast_->win.tok_h[t];
+        for (int t = 0; t < T; ++t) out[t] = have_head ? last->fast_->win.tok_h[t] : -1;
+        if (stage != nullptr) {
+            auto& W = fast_->win;
+            // Input may alias the caller's previous result: copy out via the window's own pinned storage before
+            // resizing the result. The retry path has already finished reading the input at this point.
+            if (!glmfast::cuda_ok(cudaMemcpy(W.hop_h, W.R[W.out], (size_t) T * hcE * sizeof(float),
+                                            cudaMemcpyDeviceToHost), "glm stage residual output", err)) return false;
+            stage->result->residual.assign(W.hop_h, W.hop_h + (size_t) T * hcE);
+            stage->result->picks.clear();
+            if (have_head) stage->result->picks.assign(out, out + T);
+            stage->result->logits.clear();
+            if (stage->capture_logits) {
+                stage->result->logits.resize((size_t) T * g.n_vocab);
+                if (!glmfast::cuda_ok(cudaMemcpy(stage->result->logits.data(), W.logits,
+                                                (size_t) T * g.n_vocab * sizeof(float), cudaMemcpyDeviceToHost),
+                                      "glm stage logits output", err)) return false;
+            }
+        }
     }
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         m->pos_ = p0 + T;
@@ -1993,12 +2198,17 @@ void Glm5Model::win_commit_wait() {
 }
 
 bool Glm5Model::window_commit(int n_keep, std::string& err, bool wait) {
+    if (stage_failed_) {
+        err = "glm stage: reset is required after a failed window";
+        return false;
+    }
     if (fast_ == nullptr || fast_->win.T < 1 || n_keep < 1 || n_keep > fast_->win.T) {
         err = "glm window: commit of " + std::to_string(n_keep) + " without a window of as many tokens";
         return false;
     }
     const int T = fast_->win.T;
     const int64_t p0 = fast_->win.p0;
+    if (remote_front_ && !remote_front_->commit(n_keep, err)) { stage_failed_ = true; return false; }
     // a pipelined window's parts each enqueue their own restore and replay on their crew thread, at once (one after
     // the other here, ~0.5 ms of the round on 9 GPUs between the last pick and the next anchor); this waits for the
     // enqueues, so the state is committed in stream order when it returns, as below
@@ -2027,7 +2237,16 @@ bool Glm5Model::window_commit(int n_keep, std::string& err, bool wait) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         err = std::string("glm window commit: ") + cudaGetErrorString(e);
+        if (stage_window_pending_) stage_failed_ = true;
         return false;
+    }
+    if (stage_window_pending_) {
+        if (!glmfast::cuda_ok(cudaStreamSynchronize(fast_->cs), "glm stage commit completion", err) ||
+            !fast_->route_ok(err)) {
+            stage_failed_ = true;
+            return false;
+        }
+        stage_window_pending_ = false;
     }
     return true;
 }
