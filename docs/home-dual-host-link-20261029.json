@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "utc": "2026-10-29T07:18:04.524996+00:00",
+  "description": "Synthetic TCP shape only: 16-byte request, helper-to-main payload, 16-byte commit, 8-byte ACK",
+  "peer": "192.168.0.76",
+  "main_port": 18802,
+  "connection_direction": "helper dials main (same direction as current helperd)",
+  "initial_ephemeral_port_attempts": "EHOSTUNREACH in both directions; used existing allowed 18802 instead; firewall unchanged",
+  "rows": [
+    {
+      "payload_bytes": 65536,
+      "samples": 100,
+      "warmup": 10,
+      "request_to_payload": {
+        "mean_ms": 0.30346141,
+        "p50_ms": 0.3031505,
+        "p95_ms": 0.307834,
+        "max_ms": 0.314006
+      },
+      "including_commit_ACK": {
+        "mean_ms": 0.36417336,
+        "p50_ms": 0.36262099999999997,
+        "p95_ms": 0.383114,
+        "max_ms": 0.391249
+      }
+    },
+    {
+      "payload_bytes": 131072,
+      "samples": 100,
+      "warmup": 10,
+      "request_to_payload": {
+        "mean_ms": 0.53054798,
+        "p50_ms": 0.5295325,
+        "p95_ms": 0.539365,
+        "max_ms": 0.541881
+      },
+      "including_commit_ACK": {
+        "mean_ms": 0.59865913,
+        "p50_ms": 0.5959715,
+        "p95_ms": 0.620858,
+        "max_ms": 0.626929
+      }
+    },
+    {
+      "payload_bytes": 196608,
+      "samples": 100,
+      "warmup": 10,
+      "request_to_payload": {
+        "mean_ms": 0.75215567,
+        "p50_ms": 0.75093,
+        "p95_ms": 0.760728,
+        "max_ms": 0.776789
+      },
+      "including_commit_ACK": {
+        "mean_ms": 0.82024811,
+        "p50_ms": 0.818712,
+        "p95_ms": 0.839806,
+        "max_ms": 0.848202
+      }
+    },
+    {
+      "payload_bytes": 1048576,
+      "samples": 30,
+      "warmup": 10,
+      "request_to_payload": {
+        "mean_ms": 3.6704413666666666,
+        "p50_ms": 3.667529,
+        "p95_ms": 3.685143,
+        "max_ms": 3.703597
+      },
+      "including_commit_ACK": {
+        "mean_ms": 3.7570588333333332,
+        "p50_ms": 3.7561695000000004,
+        "p95_ms": 3.775681,
+        "max_ms": 3.795318
+      }
+    }
+  ],
+  "no_GPU_or_model_execution": true,
+  "helper_probe_clean_exit": true,
+  "limitations": [
+    "No CUDA copies, kernels, KDA commit, concurrent inference, or real stage protocol.",
+    "One persistent socket, TCP_NODELAY, one pass; not a sustained network-capacity test."
+  ],
+  "source_script": {
+    "path": "/home/caterpillar/Agent/maya-dual-host-design-20261029/measure_stage_link.py",
+    "sha256": "6b199c9d8454e96e718f8ff6af9d4b54aad6021fe3fd06734d07a98345bc79ad"
+  }
+}

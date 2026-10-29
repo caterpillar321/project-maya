@@ -4,6 +4,11 @@
 개발 경로는 `/home/caterpillar/Agent/project-maya-50tps`입니다.
 압축 후에는 이 문서를 먼저 읽고 필요한 원자료만 확인합니다.
 
+최신 후속은 [두 호스트 구현 결정](home-dual-host-implementation-20261029.md)입니다.
+실제 TCP 검증 창 왕복은 T2 약 0.596 ms, T3 약 0.819 ms(p50, GPU/실제 commit 제외)였습니다.
+원격 trunk 구현은 아직 없습니다. RAM backing을 보존하는 첫 구현의 분할 후보를 cut16/18로
+넓혔습니다. 기존 cut10/11은 helper RAM 중복 제거를 가정한 용량 후보였다는 점을 구분합니다.
+
 ## 목표와 사용자 제약
 
 - GLM-5.3-Flash 단일 요청 decode 50 tok/s. IQ4_XS와 KV INT8을 유지합니다.
