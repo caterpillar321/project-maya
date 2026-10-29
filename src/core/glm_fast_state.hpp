@@ -6,6 +6,7 @@
 #include "strata/kernels/gu_code.hpp"
 
 #include "strata/core/glm_model.hpp"
+#include "strata/core/glm_helper_ownership.hpp"
 #include "strata/core/net_helper.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/kernels/glm_fast.hpp"
@@ -13,6 +14,7 @@
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "glm_memory.hpp"
 #include "glm_layer_graphs.hpp"
+#include "glm_window_trace.hpp"
 
 #include "ggml.h"
 
@@ -734,6 +736,7 @@ struct Glm5Model::FastState {
     // local helper); net_of[key] is 1 + the index of the one that holds the expert, 0 none
     std::vector<std::unique_ptr<GlmNetHelper>> net;
     std::vector<uint8_t> net_of;
+    bool has_helpers() const { return helper.device() >= 0 || !net.empty(); }
     // the copy share (STRATA_GLM_NET_COPY): copy_of[key] != 0 - net helper copy_j (1-based) holds a copy of this trunk
     // RAM-tier expert (the trunk keeps its own, net_of stays 0); copy_r[k][c][s]: of a route's k CPU-lane experts, c of
     // them with a copy, how many go there (s: the route asks that helper anyway).  copy_refs / copy_hash: the check
@@ -747,9 +750,7 @@ struct Glm5Model::FastState {
     std::atomic<uint64_t> copy_sent{0}, copy_routes{0}, copy_kept{0};
     bool aux_owns(int key) const { return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0); }
     std::vector<uint8_t> owned_all() const {   // what the primary router leaves to the helpers
-        std::vector<uint8_t> o = helper.owners();
-        for (size_t k = 0; k < o.size() && k < net_of.size(); ++k) o[k] |= net_of[k] != 0;
-        return o;
+        return glm_helper_owners((size_t) n_keys, helper.owners(), net_of);
     }
     uint8_t* helper_owned_d = nullptr;   // primary router excludes these experts from PCIe admission/prefetch
     uint64_t helper_swaps = 0;
@@ -765,6 +766,9 @@ struct Glm5Model::FastState {
     // ---- the verify WINDOW (src/core/glm_window.cu): T tokens at consecutive positions through this part's layers in
     //      one pass; every per-token activation has a row per token (row t at t * its stride), the KDA layers' inputs
     //      are kept per layer for window_commit's replay
+    // Kept outside Win: win_alloc can replace Win when increasing its capacity.
+    // Allocated only for STRATA_GLM_WIN_TRACE, and owns its reusable CUDA events.
+    std::unique_ptr<glmfast::WindowTrace> win_trace;
     struct Win {
         int tmax = 0;
         void* arena = nullptr;

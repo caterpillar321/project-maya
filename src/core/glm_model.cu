@@ -1967,6 +1967,15 @@ bool Glm5Model::load_pack_place(const std::string& pack_dir, int64_t max_ctx, st
         if (!RemoteExperts::preflight(std::atoi(h), free_gib, err)) return false;
         return load_pack(pack_dir, max_ctx, err);   // dense/state/MTP stay on device 0
     }
+    if (const char* nh = getenv("STRATA_GLM_NET_HELPER"); nh != nullptr && nh[0] != '\0') {
+        // A network helper no longer needs a local expert helper. As with the local-helper path above, suppress
+        // automatic layer splitting: independent parts cannot share helperd's single session yet.
+        if (!spec.empty() && spec != "0") {
+            err = "GLM net helper: use one trunk GPU, without a layer split";
+            return false;
+        }
+        return load_pack(pack_dir, max_ctx, err);
+    }
     const auto ints = [](const std::string& s, std::vector<int>& out) {
         out.clear();
         std::stringstream ss(s);

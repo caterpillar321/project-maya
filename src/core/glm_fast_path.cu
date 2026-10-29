@@ -2076,7 +2076,10 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
         std::fprintf(stderr, "glm fast: CUDA%d route counts for the admission bar (STRATA_GLM_PROMOTE_MIN=%d, no CPU lane)\n",
                      dev_, std::atoi(pm));
     }
-    if (const char* h = getenv("STRATA_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
+    const char* local_helper = getenv("STRATA_GLM_EXPERT_HELPER");
+    const char* net_helper = getenv("STRATA_GLM_NET_HELPER");
+    if ((local_helper != nullptr && local_helper[0] != '\0') ||
+        (net_helper != nullptr && net_helper[0] != '\0'))
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
     glmfast::pin_thread(F->svc.native_handle(), F->cpu_pin);   // (the CPU lane's last worker: on its pool's node)
@@ -2090,10 +2093,16 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         err = "GLM expert helper: use one trunk GPU and native GGUF experts (up to 8 per route)";
         return false;
     }
-    std::vector<std::pair<void*, size_t>> regions;
-    for (const auto& r : F->rc) regions.push_back({r.base, (size_t) r.n * r.stride});
-    const int device = std::atoi(getenv("STRATA_GLM_EXPERT_HELPER"));
-    if (device == dev_ || !F->helper.open(device, g_.n_embd, g_.n_ff_exp, regions, err)) return false;
+    // Network expert supply is independent of a local helper GPU. Keep one trunk until a shared network-session
+    // coordinator can route requests from several parts; helperd currently serves only one session at a time.
+    const char* local = getenv("STRATA_GLM_EXPERT_HELPER");
+    const bool have_local = local != nullptr && local[0] != '\0';
+    const int device = have_local ? std::atoi(local) : -1;
+    if (have_local) {
+        std::vector<std::pair<void*, size_t>> regions;
+        for (const auto& r : F->rc) regions.push_back({r.base, (size_t) r.n * r.stride});
+        if (device == dev_ || !F->helper.open(device, g_.n_embd, g_.n_ff_exp, regions, err)) return false;
+    }
     std::vector<int> ranked;
     size_t requested = 0;
     for (int il = l0_; il < lt_; ++il) {
@@ -2111,10 +2120,10 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
             requested += R.stride;
         }
     }
-    if (!F->helper.reserve(F->n_keys, requested, err)) return false;
+    if (have_local && !F->helper.reserve(F->n_keys, requested, err)) return false;
     std::stable_sort(ranked.begin(), ranked.end(), [&](int a, int b) { return F->usage[(size_t) a] > F->usage[(size_t) b]; });
     int resident = 0;
-    for (int key : ranked) {
+    if (have_local) for (int key : ranked) {
         const int il = key / g_.n_expert, e = key % g_.n_expert;
         auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
         if (R.stride > F->helper.available()) continue;
@@ -2126,7 +2135,7 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         ++resident;
     }
     if (const char* nh = getenv("STRATA_GLM_NET_HELPER"); nh != nullptr && nh[0] != '\0') {
-        if (F->helper.integrated()) {
+        if (have_local && F->helper.integrated()) {
             err = "GLM net helper: needs a discrete local helper GPU";
             return false;
         }
@@ -2517,6 +2526,10 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
                          cr, rtt, rtt_s, local ? cl : 0.0, p, tab.c_str(), rt.c_str());
         }
     }
+    if (!have_local && F->net.empty()) {
+        err = "GLM net helper: no helper endpoints configured";
+        return false;
+    }
     if (!glmfast::cuda_ok(cudaMalloc((void**) &F->helper_owned_d, (size_t) F->n_keys), "GLM helper ownership", err) ||
         !glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(), (size_t) F->n_keys,
                                     cudaMemcpyHostToDevice), "GLM helper ownership upload", err)) return false;
@@ -2545,10 +2558,15 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
     }
     F->cpu_retime = false;
     F->cal_key.clear();   // the CPU's decode timing must not re-plan the GPU helper's lane
-    std::fprintf(stderr, "glm helper: CUDA%d owns %d complementary experts in %.2f GiB of %s; "
-                         "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n",
-                 device, resident, (double) F->helper.used() / 1073741824.0,
-                 F->helper.integrated() ? "mapped RAM (no extra weight copy)" : "VRAM (auto, 512 MiB headroom)", dev_);
+    if (have_local) {
+        std::fprintf(stderr, "glm helper: CUDA%d owns %d complementary experts in %.2f GiB of %s; "
+                             "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n",
+                     device, resident, (double) F->helper.used() / 1073741824.0,
+                     F->helper.integrated() ? "mapped RAM (no extra weight copy)" : "VRAM (auto, 512 MiB headroom)", dev_);
+    } else {
+        std::fprintf(stderr, "glm helper: %zu network helpers without a local helper GPU; "
+                             "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n", F->net.size(), dev_);
+    }
     return true;
 }
 
@@ -4915,7 +4933,7 @@ void Glm5Model::fast_service() {
         // own pool - the other part works on its own group meanwhile; not with a helper GPU (it answers per route)
         const bool held = win_merge && rq->win_n > 0 && F->cpu_ans_h != nullptr && !F->cpu_win.dn.empty() &&
                           (!exl3_ || !F->cpu_win.x3.empty()) &&
-                          (rq->win_rows != 0 ? F->cpu_pool != nullptr && F->helper.device() < 0
+                          (rq->win_rows != 0 ? F->cpu_pool != nullptr && !F->has_helpers()
                                              : F->win_lane[0] != nullptr && F->win_lane[1] != nullptr);
         if (rq->error != 0) {
             if (held) {   // a window token's invalid route: nothing to compute, but it may be the layer's last
@@ -5240,7 +5258,7 @@ void Glm5Model::fast_service() {
             // a verify window's token answers into its own slot (the device waits for them at the layer's end)
             gf::CpuAnswer* ans = F->cpu_ans_h;
             if (rq->win > 0 && rq->win < 16 && F->win.ans_h[rq->win] != nullptr) ans = F->win.ans_h[rq->win];
-            if (F->helper.device() >= 0) {
+            if (F->has_helpers()) {
                 const auto& ly = F->L[(size_t) rq->layer];
                 const bool in_win = rq->win_n > 1;
                 RouteClock& rc = in_win ? g_rc_win : g_rc_tok;
@@ -6740,7 +6758,7 @@ bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, c
     }();
     if (proto2 && !F->net.empty()) md.req_xq = io.xq;
     // the CPU lane splits this layer's RAM-tier experts when the CPU has a dot product for its types
-    const bool lane = (F->cpu_plan != 0ull || F->helper.device() >= 0) && F->cpu_fmt[(size_t) il].n_ff > 0;
+    const bool lane = (F->cpu_plan != 0ull || F->has_helpers()) && F->cpu_fmt[(size_t) il].n_ff > 0;
     fast_moe_route(il, io, md, F->sh_hq, pred, n_ah, ah_bias, lane);
     if (F->prof_on) F->mark("moe_route");
     ++F->expected;

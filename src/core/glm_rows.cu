@@ -478,7 +478,7 @@ bool Glm5Model::rows_moe_grouped(int il, int n, std::string& err) {
         return false;
     }
     cudaStream_t s = F->cs;
-    const bool lane = (F->cpu_plan != 0ull || F->helper.device() >= 0) && F->cpu_fmt[(size_t) il].n_ff > 0;
+    const bool lane = (F->cpu_plan != 0ull || F->has_helpers()) && F->cpu_fmt[(size_t) il].n_ff > 0;
     const bool skip_empty = glmfast::skip_empty_on();
     const bool empty = F->all_resident || (skip_empty && F->layer_resident(il));
     gf::MoeDev md = F->md;

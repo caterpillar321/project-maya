@@ -379,6 +379,7 @@ bool Glm5Model::fast_dsa_window(int il, int64_t p0, int t0, int T, std::string& 
     static const bool prof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
     const auto mark = [&](const char* nm) {
         if (prof) W.mark(nm, s);
+        if (F->win_trace) F->win_trace->mark(il, nm, -1, s);
     };
     if (!gf::mv(j, 5, s)) { err = "glm window: dsa projections"; return false; }
     mark("dsa_proj_mv");
@@ -520,6 +521,9 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     const auto& Ly = F->L[(size_t) il];
     const int E = g.n_embd, FFs = g.n_ff_exp * g.n_shared;
     static const bool prof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
+    const auto trace = [&](const char* stage, int row = -1) {
+        if (F->win_trace) F->win_trace->mark(il, stage, row, s);
+    };
     if (part != 2) {
         gf::MvJob j[3];
         const void* xq0 = (const uint8_t*) W.xq + (size_t) t0 * W.xq_s;
@@ -537,6 +541,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         }
         if (!gf::mv(j, 3, s)) { err = "glm window: router / shared expert"; return false; }
         if (prof) W.mark("moe_mv", s);
+        trace("moe_router_shared_up");
     }
     gf::MoeDev md = F->md;
     md.pf_src = F->pf_buf[il & 1];
@@ -556,7 +561,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         a.limit = g.swiglu_exp;
         return a;
     };
-    const bool lane = (F->cpu_plan != 0ull || F->helper.device() >= 0) && F->cpu_fmt[(size_t) il].n_ff > 0;
+    const bool lane = (F->cpu_plan != 0ull || F->has_helpers()) && F->cpu_fmt[(size_t) il].n_ff > 0;
     // STRATA_GLM_TRUNK_KEEP / _MAP: a window token leaves out the same experts the token path would (8: none)
     const int keep = il == mtp_il_ ? 8 : glmfast::trunk_skip_from(il);
     // STRATA_GLM_WIN_SPARES=1: the layer's spares topped up before its routes (glm_win_spares; default off)
@@ -686,19 +691,26 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                           nullptr, nullptr, 0, nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, 0, 0, t,
                           private_scratch ? nullptr : scr, t0 + T);
             ++F->expected;
+            trace("moe_route", t);
             // (every expert in VRAM: the wait and the fetch are no-ops - fast_moe's all_resident, 2 launches a token)
             if (!F->all_resident) {
                 gf::moe_wait(mt, E, s);
+                trace("moe_route_wait", t);
                 gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s,
                               route_ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
+                trace(route_ahead ? "moe_fetch_disk_rows" : "moe_fetch_all", t);
             }
-            if (W.uid != nullptr)
+            if (W.uid != nullptr) {
                 cudaMemcpyAsync(W.uid + ((size_t) (il - l0_) * kWinMax + t) * 8, mt.plan_id, 8 * sizeof(int),
                                 cudaMemcpyDeviceToDevice, s);
+                trace("moe_route_ids", t);
+            }
         }
         if (route_ahead && !F->all_resident)
-            for (int t = t0; t < t0 + T; ++t)
+            for (int t = t0; t < t0 + T; ++t) {
                 gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::NoDiskMiss);
+                trace("moe_fetch_ram_rows", t);
+            }
         if (prof_b) W.mark("moe_routes", s);
         }
         if (part == 1) return true;
@@ -827,8 +839,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             }
         }
         if (prof_b) W.mark("moe_experts", s);
+        trace("moe_experts");
         if (lane)
-            for (int t = t0; t < t0 + T; ++t) gf::moe_cpu_wait(tok_dev(t), E, W.ffn + (size_t) t * E, s);
+            for (int t = t0; t < t0 + T; ++t) {
+                gf::moe_cpu_wait(tok_dev(t), E, W.ffn + (size_t) t * E, s);
+                trace("moe_helper_join", t);
+            }
         if (prof_b) W.mark("moe_cpu_wait", s);
         return true;
     }
@@ -927,13 +943,16 @@ bool Glm5Model::fast_window_layers(int64_t p0, int T, std::string& err) {
         }
     };
     static const bool prof = getenv("STRATA_GLM_WIN_PROF") != nullptr;
+    int trace_layer = -1;
     const auto mark = [&](const char* nm) {
         if (prof) W.mark(nm, s);
+        if (F->win_trace) F->win_trace->mark(trace_layer, nm, -1, s);
     };
     // a layer's first half for tokens t0 .. t0 + n - 1: the attention side, the FFN-side read, and the FFN up to its
     // routes (moe part 1) - or all of it (moe part 0 / a dense FFN).  The second half (moe part 2): the experts and the
     // CPU lane's answers.
     const auto pre = [&](int il, int t0, int n, int moe_part, int gid) -> bool {
+        trace_layer = il;
         const auto& Ly = F->L[(size_t) il];
         const int k = il - l0_;
         hc_rows(il, true, rc_in[(size_t) k], t0, n);
@@ -998,7 +1017,7 @@ bool Glm5Model::fast_window_layers(int64_t p0, int T, std::string& err) {
         if (!F->L[(size_t) il].moe) return true;
         return fast_moe_window(il, t0, n, 2, gid, err);
     };
-    mark("start");
+    if (prof) W.mark("start", s);
     // STAGGERED (a window of 2+ tokens, the batched MoE): the tokens in two groups A, B, one layer's halves
     // interleaved - pre(l, A) pre(l, B) post(l, A) pre(l + 1, A) post(l, B) pre(l + 1, B) .. - so while the CPU lane
     // answers one group's experts the device runs the other group's attention and routes, where it used to wait.
@@ -1030,6 +1049,7 @@ bool Glm5Model::fast_window_layers(int64_t p0, int T, std::string& err) {
         gf::hc_post(W.ffn + (size_t) t * E, W.R[rc] + (size_t) t * hcE, W.post + (size_t) t * 8,
                     W.comb + (size_t) t * 16, E, W.R[rc ^ 1] + (size_t) t * hcE, s);
     W.out = rc ^ 1;
+    if (F->win_trace) F->win_trace->mark(-1, "final_hc", -1, s);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         err = std::string("glm window: ") + cudaGetErrorString(e);
@@ -1102,6 +1122,16 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
     cudaSetDevice(dev_);
     hlap(WH.h_setup);
     if (audit) WH.audit_setup_ms += audit_ms(audit_start);
+    if (glmfast::WindowTrace::enabled()) {
+        if (!fast_->win_trace) fast_->win_trace = std::make_unique<glmfast::WindowTrace>(dev_);
+        const char* stagger = getenv("STRATA_GLM_WIN_STAGGER");
+        const bool supported = n_parts_ == 1 && split_next_ == nullptr && (T == 2 || T == 3) &&
+                               stagger != nullptr && std::atoi(stagger) == 0 &&
+                               glmfast::off_by_default_on_amd("STRATA_GLM_WIN_BATCH") &&
+                               !WH.piped && WH.mplan_ptr != nullptr && fast_->rows_scr != nullptr &&
+                               fast_->win_scratch_rows >= T && fast_->rows_group >= T;
+        fast_->win_trace->begin_window(p0, T, l0_, l1_, supported);
+    }
     // a batched pass whose tokens took more scratch slots than a layer has runs again token by token (rare: the tiers
     // land a fetched expert in a spare slot first)
     for (int attempt = 0;; ++attempt) {
@@ -1120,9 +1150,11 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
             tt->to_float(pack_emb_src_ + (size_t) tokens[t] * ggml_row_size((ggml_type) pack_emb_type_, E), row, E);
             if (const float* img = image_row(p0 + t)) std::memcpy(row, img, (size_t) E * sizeof(float));
         }
+        if (F->win_trace) F->win_trace->begin_attempt(attempt, W.per_token, F->cs);
         cudaMemcpyAsync(W.emb, W.emb_h, (size_t) T * E * sizeof(float), cudaMemcpyHostToDevice, F->cs);
         for (int t = 0; t < T; ++t)
             gf::embed_streams(W.emb + (size_t) t * E, W.R[0] + (size_t) t * hcE, E, F->cs);
+        if (F->win_trace) F->win_trace->mark(-1, "embedding", -1, F->cs);
     }
     if (!fast_window_layers(p0, T, err)) return false;
     // each later part: the rows cross over through the previous part's pinned buffer, ordered on the devices
@@ -1166,21 +1198,26 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         for (int t = 0; t < T; ++t) gf::argmax(WT.logits + (size_t) t * g.n_vocab, g.n_vocab, WT.tok + t, FT->cs);
     }
     cudaMemcpyAsync(WT.tok_h, WT.tok, (size_t) T * sizeof(int), cudaMemcpyDeviceToHost, FT->cs);
+    if (FT->win_trace) FT->win_trace->mark(-1, "head_and_pick", -1, FT->cs);
     hlap(WH.h_enqueue);
     // every part done (their captures for the drafter too)
     bool clash = false;
+    bool trace_sync_ok = true;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         cudaSetDevice(m->dev_);
         auto& Wm = m->fast_->win;
         if (Wm.scr != nullptr && Wm.scr_h != nullptr)   // both groups' sticky words: [1], [3]
             cudaMemcpyAsync(Wm.scr_h, Wm.scr + 1, 3 * sizeof(unsigned int), cudaMemcpyDeviceToHost, m->fast_->cs);
-        cudaStreamSynchronize(m->fast_->cs);
+        if (m->fast_->win_trace) m->fast_->win_trace->mark(-1, "result_copy", -1, m->fast_->cs);
+        const cudaError_t sync_result = cudaStreamSynchronize(m->fast_->cs);
+        trace_sync_ok = trace_sync_ok && sync_result == cudaSuccess;
         if (Wm.scr_h != nullptr && ((Wm.scr_h[0] | Wm.scr_h[2]) & 0x80000000u) != 0u) clash = true;
         if (audit && Wm.scr_h != nullptr) {
             WH.audit_group_clashes[0] += (Wm.scr_h[0] & 0x80000000u) != 0u;
             WH.audit_group_clashes[1] += (Wm.scr_h[2] & 0x80000000u) != 0u;
         }
     }
+    if (fast_->win_trace) fast_->win_trace->collect(clash && attempt == 0, trace_sync_ok && gf::launch_errors() == 0);
     if (audit) {
         ++WH.audit_attempts;
         const double elapsed = audit_ms(attempt_start);
@@ -1542,6 +1579,12 @@ bool Glm5Model::win_pipe_begin(int32_t first, std::string& err, const strata::ke
         return false;
     }
     const int64_t p0 = pos_;
+    if (glmfast::WindowTrace::enabled()) {
+        if (!fast_->win_trace) fast_->win_trace = std::make_unique<glmfast::WindowTrace>(dev_);
+        // This tracer owns one stream's batched window only. Count the unsupported
+        // pipeline explicitly; never attribute its concurrent work to that model.
+        fast_->win_trace->begin_window(p0, 0, l0_, l1_, false);
+    }
     int n_parts = 0;
     // a fresh window waits for the devices; one that follows a window's late tokens only queues behind them.  Each
     // part's begin (win_pipe_begin_part) runs on its crew thread ahead of its share of the first token, the parts at
@@ -1858,6 +1901,7 @@ void Glm5Model::win_prof_report() {
                          m->dev_, (double) W.u_distinct / W.u_layers, (double) W.u_picks / W.u_layers,
                          100.0 * (double) W.u_distinct / (double) std::max<int64_t>(1, W.u_picks));
         W.u_layers = W.u_distinct = W.u_picks = 0;
+        if (m->fast_->win_trace) m->fast_->win_trace->report();
     }
 }
 
