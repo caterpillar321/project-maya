@@ -1,0 +1,120 @@
+diff --git a/src/program/helperd.cpp b/src/program/helperd.cpp
+index 6643ba8..fd92acd 100644
+--- a/src/program/helperd.cpp
++++ b/src/program/helperd.cpp
+@@ -45,6 +45,9 @@ namespace kc = strata::kernels::cpu;
+ namespace {
+ size_t g_ram_bytes = 0;
+ int g_cpu_threads = 0;
++int g_cpu_tasks_per_thread = 4;  // opt-in decode task granularity; arithmetic/order within each row is unchanged
++bool g_cpu_gpu_overlap = false; // FP32 kCompute mixed routes only
++int g_overlap_checks = 0;
+ int g_selftest = 0;
+ int g_rows_check = 0;
+ bool g_ram_cold = false;   // --ram-cold
+@@ -168,6 +171,8 @@ struct Session {
+     int n_embd = 0, n_ff = 0;
+     uint64_t computed = 0, routes = 0, inserted = 0;
+     double ms_compute = 0;
++    uint64_t overlap_routes = 0, overlap_checks = 0;
++    double overlap_wait_ms = 0;
+     // the RAM tier: experts past the VRAM, computed by this machine's CPU
+     uint8_t* ram = nullptr;
+     size_t ram_cap = 0, ram_used = 0;
+@@ -246,6 +251,9 @@ struct Session {
+     }
+ 
+     ~Session() {
++        if (g_cpu_gpu_overlap)
++            std::fprintf(stderr, "helperd overlap: mixed_routes=%llu checked=%llu gpu_wait_after_cpu_ms=%.3f\n",
++                         (unsigned long long) overlap_routes, (unsigned long long) overlap_checks, overlap_wait_ms);
+         for (int f : shard_fd) if (f >= 0) ::close(f);
+         if (stage) cudaFreeHost(stage);
+         if (ram) ::munmap(ram, ram_cap);
+@@ -276,7 +284,7 @@ struct Session {
+     }
+     // ... with the activation already in act (kCompute2's kXk)
+     void cpu_start_act(const kc::NativeFmt& nf, float limit, int ne, const uint8_t* const* blob, const uint32_t* up) {
+-        const int T = pool->size() * 4, gu_tot = ne * n_ff;
++        const int T = pool->size() * g_cpu_tasks_per_thread, gu_tot = ne * n_ff;
+         pool->start(T, [=, this, &nf](int job) {
+             const void* a[1] = {act.data()};
+             const int q1 = (int) ((int64_t) gu_tot * (job + 1) / T);
+@@ -292,7 +300,7 @@ struct Session {
+         pool->wait();
+         for (int i = 0; i < ne; ++i)
+             kc::native_quant_h(nf, ff.data() + (size_t) i * n_ff, hq.data() + (size_t) i * kc::kNativeHBytes);
+-        const int T = pool->size() * 4, dn_tot = ne * n_embd;
++        const int T = pool->size() * g_cpu_tasks_per_thread, dn_tot = ne * n_embd;
+         pool->run(T, [=, this, &nf](int job) {
+             const int q1 = (int) ((int64_t) dn_tot * (job + 1) / T);
+             for (int q = (int) ((int64_t) dn_tot * job / T); q < q1;) {
+@@ -487,9 +495,17 @@ struct Session {
+             }
+             // the CPU starts its gate/up rows, the GPU does its share meanwhile, then the CPU's down rows
+             if (cn > 0) cpu_start(*nf, (size_t) q.down_off, q.limit, cn, cb, cu, x);
++            const bool overlap = g_cpu_gpu_overlap && cn > 0 && gn > 0;
++            // The insert staging buffer is pinned and idle throughout this serialized compute request.
++            // A pageable vector destination can make cudaMemcpyAsync wait on the host already at enqueue.
++            float* gpu_out = overlap ? reinterpret_cast<float*>(staging(out.size() * sizeof(float))) : out.data();
++            if (overlap && gpu_out == nullptr) { pool->wait(); return fail(fd, "no pinned overlap output"); }
+             if (gn > 0) {
+                 const auto gpu0 = g_queue_probe ? std::chrono::steady_clock::now() : t0;
+-                if (!helper.compute(q.gu_type, q.d_type, (size_t) q.down_off, q.limit, gn, gk, gw, x, out.data(), err)) {
++                const bool okg = overlap
++                    ? helper.compute_begin(q.gu_type, q.d_type, (size_t) q.down_off, q.limit, gn, gk, gw, x, gpu_out, err)
++                    : helper.compute(q.gu_type, q.d_type, (size_t) q.down_off, q.limit, gn, gk, gw, x, out.data(), err);
++                if (!okg) {
+                     if (cn > 0) pool->wait();
+                     return fail(fd, err);
+                 }
+@@ -501,6 +517,21 @@ struct Session {
+             if (cn > 0) {
+                 const auto c0 = std::chrono::steady_clock::now();
+                 cpu_finish(*nf, (size_t) q.down_off, cn, cb, cw);
++                if (overlap) {
++                    const auto wait0 = std::chrono::steady_clock::now();
++                    if (!helper.compute_finish(err)) return fail(fd, err);
++                    overlap_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait0).count();
++                    std::memcpy(out.data(), gpu_out, out.size() * sizeof(float));
++                    ++overlap_routes;
++                    if (overlap_checks < (uint64_t) g_overlap_checks) {
++                        gout.resize(out.size());
++                        if (!helper.compute(q.gu_type, q.d_type, (size_t) q.down_off, q.limit, gn, gk, gw, x, gout.data(), err))
++                            return fail(fd, err);
++                        if (std::memcmp(gout.data(), out.data(), out.size() * sizeof(float)) != 0)
++                            return fail(fd, "overlap GPU result differs from synchronous result");
++                        ++overlap_checks;
++                    }
++                }
+                 for (int r = 0; r < n_embd; ++r) out[(size_t) r] += cpu_out[(size_t) r];
+                 ms_cpu += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+                 cpu_experts += (uint64_t) cn;
+@@ -928,10 +959,27 @@ int main(int argc, char** argv) {
+         }
+     }
+     if (g_cpu_threads <= 0) g_cpu_threads = std::max(1u, std::thread::hardware_concurrency() / 2);
++    if (const char* value = getenv("HELPERD_CPU_TASKS_PER_THREAD")) {
++        char* end = nullptr;
++        const long tasks = std::strtol(value, &end, 10);
++        if (end == value || *end != '\0' || tasks < 1 || tasks > 16) {
++            std::fprintf(stderr, "helperd: HELPERD_CPU_TASKS_PER_THREAD must be an integer in [1,16]\n");
++            return 2;
++        }
++        g_cpu_tasks_per_thread = (int) tasks;
++    }
++    std::fprintf(stderr, "helperd: decode CPU tasks per thread: %d\n", g_cpu_tasks_per_thread);
+     if (const char* st = getenv("HELPERD_SELFTEST")) g_selftest = std::atoi(st);
+     if (const char* rc = getenv("HELPERD_ROWS_CHECK")) g_rows_check = std::atoi(rc);
+     if (const char* rs = getenv("HELPERD_ROWS_SERIAL")) g_rows_serial = std::atoi(rs) != 0;
+     if (const char* qp = getenv("HELPERD_QUEUE_PROBE")) g_queue_probe = std::atoi(qp) != 0;
++    if (const char* ov = getenv("HELPERD_CPU_GPU_OVERLAP")) g_cpu_gpu_overlap = std::atoi(ov) != 0;
++    if (const char* ck = getenv("HELPERD_OVERLAP_CHECKS")) g_overlap_checks = std::max(0, std::atoi(ck));
++    if (g_cpu_gpu_overlap && g_queue_probe) {
++        std::fprintf(stderr, "helperd: overlap and queue probe use different timing boundaries; run separately\n");
++        return 2;
++    }
++    if (g_cpu_gpu_overlap) std::fprintf(stderr, "helperd: CPU/GPU overlap enabled for mixed kCompute routes, checks=%d\n", g_overlap_checks);
+     if (g_queue_probe) std::fprintf(stderr, "helperd: queue probe enabled (no batching, bounded nonblocking peek, CPU job clocks)\n");
+     if (g_ram_bytes > 0 && !kc::native_experts_available()) {
+         std::fprintf(stderr, "helperd: --ram-gib needs the ggml-cpu path (STRATA_NATIVE_EXPERTS)\n");
