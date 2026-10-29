@@ -232,7 +232,8 @@ struct MoeDev {
     float* plan_w = nullptr;                   // [8]
     int* plan_id = nullptr;                    // [8]
     unsigned long long* fetch_src = nullptr;   // [8] host-mapped source (0 = nothing to fetch for entry i)
-    // Non-staggered private T2/T3 only: earlier rows on the same stream have completed their fetches.
+    // Non-staggered private T2/T3 only: earlier rows on the same stream own immutable scratch weights.
+    // A route-ahead window may defer their RAM fetches, but completes every fetch before expert evaluation.
     const unsigned long long* win_reuse_ptr = nullptr;      // [T][8] current layer's row plans (T=2 or 3)
     const int* win_reuse_id = nullptr;                      // [T][8] current layer's expert IDs
     const unsigned long long* win_reuse_scratch = nullptr;  // [T][8] actual private scratch addresses
@@ -365,7 +366,11 @@ void moe_prefetch(const MoeDev& d, size_t blob_bytes, cudaStream_t s);
 /// Waits (on the device) for the host's response when the last route had misses, then applies it.
 void moe_wait(const MoeDev& d, int n_embd, cudaStream_t s);
 /// Copies every planned expert with a fetch source from the RAM tier (host-mapped) into its VRAM slot.
-void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s);
+// The split phases require a row-private wait_seq. moe_wait preserves it: nonzero means this row had a disk miss.
+// Such rows fetch immediately, before the next route can reuse host staging; other rows may fetch after routing.
+enum class MoeFetchPhase { All, HasDiskMiss, NoDiskMiss };
+void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s,
+               MoeFetchPhase phase = MoeFetchPhase::All);
 /// moe_wait then moe_fetch as ONE launch (the same effects; STRATA_GLM_SKIP_EMPTY's batched rows): a route with no
 /// disk miss and nothing to fetch costs one near-empty launch instead of two.
 void moe_wait_fetch(const MoeDev& d, int n_embd, int k, size_t blob_bytes, cudaStream_t s);

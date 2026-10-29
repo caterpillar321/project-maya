@@ -613,6 +613,19 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     // overwrite A(l) before B(l) computes, so split groups must never share these private weights.
     const bool fetch_reuse = F->win_fetch_reuse && private_scratch && batch_env && part == 0 &&
                              t0 == 0 && (T == 2 || T == 3) && W.T == T && !W.piped && n_parts_ == 1;
+    // Issue later rows' helper requests before earlier rows' RAM transfers. Disk rows keep their original
+    // route/wait/fetch ordering: fast_service may overwrite its shared host staging on the next route.
+    // No expert executes until both phases have completed. Shared/staggered scratch is deliberately excluded.
+    static const bool route_ahead_env = [] {
+        const char* v = getenv("STRATA_GLM_WIN_ROUTE_AHEAD");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    const bool route_ahead = route_ahead_env && private_scratch && batch_env && part == 0 &&
+                             t0 == 0 && (T == 2 || T == 3) && W.T == T && !W.piped && n_parts_ == 1;
+    static std::atomic<bool> route_ahead_logged{false};
+    if (route_ahead && !route_ahead_logged.exchange(true))
+        std::fprintf(stderr, "glm window route ahead: CUDA%d active for private T%d; RAM fetches deferred, "
+                             "disk rows fetched before the next route\n", dev_, T);
     if (fetch_reuse && !F->win_fetch_reuse_logged) {
         std::fprintf(stderr, "glm window fetch reuse: CUDA%d active for private T%d, non-staggered full layers\n", dev_, T);
         F->win_fetch_reuse_logged = true;
@@ -651,6 +664,10 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                 mt.cpu_seq = W.cpu_seq_w + 16 * t;
                 mt.cpu_ans = W.ans_d[t];
             }
+            // Each cpu_seq_w row reserves 16 uints; only [0] is its CPU-answer sequence. Keep [1] for the
+            // route's disk sequence through both fetch phases. moe_wait must not be replaced by wait_fetch,
+            // which clears wait_seq. Row 0's CPU sequence remains the ordinary md.cpu_seq as before.
+            if (route_ahead) mt.wait_seq = W.cpu_seq_w + 16 * t + 1;
             return mt;
         };
         // this layer's scratch claims (word 1 stays sticky): all 8 slots free, or the group's 4 (words 8 / 9 hold the
@@ -672,12 +689,16 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             // (every expert in VRAM: the wait and the fetch are no-ops - fast_moe's all_resident, 2 launches a token)
             if (!F->all_resident) {
                 gf::moe_wait(mt, E, s);
-                gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s);
+                gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s,
+                              route_ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
             }
             if (W.uid != nullptr)
                 cudaMemcpyAsync(W.uid + ((size_t) (il - l0_) * kWinMax + t) * 8, mt.plan_id, 8 * sizeof(int),
                                 cudaMemcpyDeviceToDevice, s);
         }
+        if (route_ahead && !F->all_resident)
+            for (int t = t0; t < t0 + T; ++t)
+                gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::NoDiskMiss);
         if (prof_b) W.mark("moe_routes", s);
         }
         if (part == 1) return true;

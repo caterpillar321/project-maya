@@ -4193,7 +4193,8 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
                     } else {
                         ptr = a.d.scratch[i];
                         // Keep helper/CPU/promotion admission above unchanged. Only a RAM -> private scratch
-                        // fallback may alias completed immutable weights from an earlier row of this T2/T3 layer.
+                        // fallback may alias immutable weights owned by an earlier row of this T2/T3 layer.
+                        // Route-ahead windows finish the deferred RAM fetches before any expert reads the plans.
                         if (src != 0ull && (a.win_n == 2 || a.win_n == 3) && a.win > 0 && a.win < a.win_n && a.win_rows == 0 &&
                             a.d.win_reuse_ptr != nullptr && a.d.win_reuse_id != nullptr &&
                             a.d.win_reuse_scratch != nullptr) {
@@ -4445,7 +4446,12 @@ __global__ void __launch_bounds__(256) moe_prefetch_kernel(MoeDev d, size_t n16)
 }
 
 // one block per SM, 16-byte loads: the PCIe pull measured 11.5 GB/s (a little over cudaMemcpy's 10.7)
+template<MoeFetchPhase phase>
 __global__ void __launch_bounds__(256) moe_fetch_kernel(MoeDev d, int k, size_t n16) {
+    if constexpr (phase != MoeFetchPhase::All) {
+        const bool disk = *d.wait_seq != 0u;
+        if (disk != (phase == MoeFetchPhase::HasDiskMiss)) return;
+    }
     for (int i = 0; i < k; ++i) {
         const unsigned long long src = d.fetch_src[i];
         if (src == 0ull) continue;
@@ -6386,7 +6392,7 @@ void moe_prefetch(const MoeDev& d, size_t blob_bytes, cudaStream_t s) {
     launch_check("moe_prefetch");
 }
 
-void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s) {
+void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s, MoeFetchPhase phase) {
     static int sms = 0;
     if (sms == 0) {
         int dev = 0;
@@ -6409,7 +6415,14 @@ void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s) {
         std::fprintf(stderr, "glm fetch: host-mapped expert copies use %ld blocks of 256 threads\n", n);
         return (int) n;
     }();
-    moe_fetch_kernel<<<blocks_env > 0 ? blocks_env : sms, 256, 0, s>>>(d, k, (blob_bytes + 15) / 16);
+    const int blocks = blocks_env > 0 ? blocks_env : sms;
+    const size_t n16 = (blob_bytes + 15) / 16;
+    if (phase == MoeFetchPhase::HasDiskMiss)
+        moe_fetch_kernel<MoeFetchPhase::HasDiskMiss><<<blocks, 256, 0, s>>>(d, k, n16);
+    else if (phase == MoeFetchPhase::NoDiskMiss)
+        moe_fetch_kernel<MoeFetchPhase::NoDiskMiss><<<blocks, 256, 0, s>>>(d, k, n16);
+    else
+        moe_fetch_kernel<MoeFetchPhase::All><<<blocks, 256, 0, s>>>(d, k, n16);
     launch_check("moe_fetch");
 }
 

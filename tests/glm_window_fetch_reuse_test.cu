@@ -31,7 +31,12 @@ template<class V> std::vector<V> download(const V* p, size_t n) {
 template<class V> void upload(V* p, const std::vector<V>& v) {
     CK(cudaMemcpy(p, v.data(), v.size() * sizeof(V), cudaMemcpyHostToDevice));
 }
-struct Settings { bool reuse = false, ram = true, helper = false; int spares = 0, promote_min = 0; unsigned long long cpu = 0; };
+struct Settings {
+    bool reuse = false, ram = true, helper = false, ahead = false, staging = false;
+    uint32_t disk_keys = 0;
+    int spares = 0, promote_min = 0;
+    unsigned long long cpu = 0;
+};
 struct Result { std::vector<gf::MoeRequest> requests; std::vector<uint8_t> bytes; std::vector<float> weights; int groups = 0; };
 
 struct Fixture {
@@ -41,6 +46,8 @@ struct Fixture {
     std::vector<void*> allocations;
     uint8_t* host = nullptr;
     uint8_t* host_d = nullptr;
+    uint8_t* stage = nullptr;
+    uint8_t* stage_d = nullptr;
     gf::MoeRequest* ring = nullptr;
     gf::MoeResponse* response = nullptr;
     uint8_t* scratch;
@@ -63,6 +70,8 @@ struct Fixture {
     explicit Fixture(size_t bytes, int rows) : T(rows), blob(bytes) {
         CK(cudaHostAlloc((void**) &host, NL * NE * blob, cudaHostAllocMapped));
         CK(cudaHostGetDevicePointer((void**) &host_d, host, 0));
+        CK(cudaHostAlloc((void**) &stage, K * blob, cudaHostAllocMapped));
+        CK(cudaHostGetDevicePointer((void**) &stage_d, stage, 0));
         for (size_t i = 0; i < NL * NE * blob; ++i) host[i] = (uint8_t) ((i / blob * 17 + i % blob) % 251);
         CK(cudaHostAlloc((void**) &ring, sizeof(*ring) * gf::kRingSize, cudaHostAllocMapped));
         CK(cudaHostGetDevicePointer(&base.ring, ring, 0));
@@ -79,7 +88,7 @@ struct Fixture {
         plan_weights = alloc<float>(T * K); fetch = alloc<unsigned long long>(T * K);
         base.cpu_part = alloc<float>(T * E); base.cpu_flag = alloc<int>(T);
         base.cpu_seq = alloc<unsigned int>(T * 16); base.seq = alloc<unsigned int>(1);
-        base.wait_seq = alloc<unsigned int>(1); base.pf_n = alloc<int>(1);
+        base.wait_seq = alloc<unsigned int>(T * 16); base.pf_n = alloc<int>(1);
         base.pf_src = alloc<unsigned long long>(K); base.pf_dst = alloc<unsigned long long>(K);
         base.dcnt = alloc<unsigned int>(NL * NE);
         owned = alloc<uint8_t>(NL * NE); base.helper_owned = owned;
@@ -90,17 +99,20 @@ struct Fixture {
     ~Fixture() {
         gf::set_skip(nullptr);
         for (void* p : allocations) cudaFree(p);
-        cudaFreeHost(response); cudaFreeHost(ring); cudaFreeHost(host);
+        cudaFreeHost(response); cudaFreeHost(ring); cudaFreeHost(stage); cudaFreeHost(host);
     }
     void reset(Settings s, int il = 0, bool clear_plans = true) {
         setting = s; layer = il; gf::set_skip(nullptr);
         CK(cudaMemset(base.seq, 0, sizeof(unsigned int))); CK(cudaMemset(base.dcnt, 0, NL * NE * sizeof(unsigned int)));
         CK(cudaMemset(base.cpu_seq, 0, T * 16 * sizeof(unsigned int)));
+        CK(cudaMemset(base.wait_seq, 0, T * 16 * sizeof(unsigned int)));
         CK(cudaMemset(scratch, 0xa5, T * K * blob)); CK(cudaMemset(owned, s.helper ? 1 : 0, NL * NE));
         std::memset(ring, 0, sizeof(*ring) * gf::kRingSize); std::memset(response, 0, sizeof(*response));
         if (clear_plans) { CK(cudaMemset(plans, 0, T * K * sizeof(unsigned long long))); CK(cudaMemset(plan_ids, 0xff, T * K * sizeof(int))); }
         std::vector<unsigned long long> table(2 * NL * NE + NL * gf::kSpares, 0);
-        if (s.ram) for (int key = 0; key < NL * NE; ++key) table[NL * NE + key] = (unsigned long long) (host_d + key * blob);
+        if (s.ram) for (int key = 0; key < NL * NE; ++key)
+            if ((s.disk_keys & (1u << (key % NE))) == 0)
+                table[NL * NE + key] = (unsigned long long) (host_d + key * blob);
         for (int i = 0; i < s.spares; ++i) table[2 * NL * NE + il * gf::kSpares + i] = (unsigned long long) (spare + i * blob);
         upload(base.tab, table);
     }
@@ -109,6 +121,7 @@ struct Fixture {
         d.scratch = slots + t * K; d.plan_ptr = plans + t * K; d.plan_id = plan_ids + t * K;
         d.plan_w = plan_weights + t * K; d.fetch_src = fetch + t * K;
         d.cpu_flag += t; d.cpu_part += t * E; d.cpu_seq += t * 16;
+        if (setting.ahead) d.wait_seq += t * 16;
         if (setting.reuse) { d.win_reuse_ptr = plans; d.win_reuse_id = plan_ids; d.win_reuse_scratch = slots; }
         return d;
     }
@@ -127,16 +140,29 @@ struct Fixture {
         if (complete) {
             if (request.miss_mask) {
                 std::memset(response, 0, sizeof(*response)); response->ptr_mask = request.miss_mask;
-                for (int i = 0; i < K; ++i) response->ptr[i] = (unsigned long long) (host_d + (layer * NE + request.ids[i]) * blob);
+                int m = 0;
+                for (int i = 0; i < K; ++i) if ((request.miss_mask >> i) & 1u) {
+                    const size_t off = (size_t) (layer * NE + request.ids[i]) * blob;
+                    if (setting.staging) {
+                        // Every row reuses the SAME staging slots, as fast_service does when RAM is full.
+                        // An earlier disk row must have consumed its bytes before this overwrite.
+                        std::memcpy(stage + m * blob, host + off, blob);
+                        response->ptr[i] = (unsigned long long) (stage_d + m++ * blob);
+                    } else response->ptr[i] = (unsigned long long) (host_d + off);
+                }
                 response->seq = seq;
             }
-            gf::moe_wait(d, E, 0); gf::moe_fetch(d, K, blob, 0); CK(cudaStreamSynchronize(0));
+            gf::moe_wait(d, E, 0);
+            gf::moe_fetch(d, K, blob, 0,
+                          setting.ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
+            CK(cudaStreamSynchronize(0));
         }
         return request;
     }
     Result run(Settings s, int il = 0, bool clear_plans = true) {
         reset(s, il, clear_plans); Result result; result.requests.resize(T);
         for (int t = 0; t < T; ++t) result.requests[t] = route(t);
+        if (s.ahead) finish_fetches();
         const auto pp = download(plans, T * K);
         result.bytes.resize(T * K * blob, 0);
         for (int i = 0; i < T * K; ++i) if (pp[i]) CK(cudaMemcpy(result.bytes.data() + i * blob, (void*) pp[i], blob, cudaMemcpyDeviceToHost));
@@ -146,6 +172,10 @@ struct Fixture {
         w.grp_ent = alloc<int>(T * K); w.n_groups = alloc<int>(1); gf::moe_win_group(w, 0);
         result.groups = download(w.n_groups, 1)[0];
         return result;
+    }
+    void finish_fetches() {
+        for (int t = 0; t < T; ++t) gf::moe_fetch(row(t), K, blob, 0, gf::MoeFetchPhase::NoDiskMiss);
+        CK(cudaStreamSynchronize(0));
     }
 };
 int count(const Result& r, bool reuse) {
@@ -214,6 +244,73 @@ void test_routes(int T) {
                 T, T * K, T * K - reused);
 }
 
+void same_schedule_result(const Result& a, const Result& b) {
+    expect(a.bytes == b.bytes, "route-ahead reads the same weight bytes");
+    expect(a.groups == b.groups && a.weights.size() == b.weights.size() &&
+           std::memcmp(a.weights.data(), b.weights.data(), a.weights.size() * sizeof(float)) == 0,
+           "route-ahead leaves groups and route weights unchanged");
+    expect(a.requests.size() == b.requests.size(), "route-ahead leaves request count unchanged");
+    for (size_t t = 0; t < a.requests.size(); ++t) {
+        const auto& x = a.requests[t]; const auto& y = b.requests[t];
+        expect(x.fetch_mask == y.fetch_mask && x.reuse_mask == y.reuse_mask && x.cpu_mask == y.cpu_mask &&
+               x.promo_mask == y.promo_mask && x.miss_mask == y.miss_mask && x.skip_mask == y.skip_mask &&
+               std::memcmp(x.ids, y.ids, sizeof(x.ids)) == 0,
+               "route-ahead preserves fetch/reuse/CPU/promotion/disk/expert decisions");
+    }
+}
+
+void test_route_ahead(int T) {
+    Fixture f(4096, T);
+    for (bool reuse : {false, true}) for (int scenario = 0; scenario < 10; ++scenario) {
+        Settings s; s.reuse = reuse; s.staging = true;
+        if (scenario == 1) s.spares = 3;
+        if (scenario == 2) s.cpu = 8ull << 32;
+        if (scenario == 3) s.helper = true;
+        if (scenario == 4) s.ram = false;
+        if (scenario == 5) s.disk_keys = 1u;             // first row disk, second row RAM
+        if (scenario == 6) s.disk_keys = 1u << 8;        // first row RAM, second row disk
+        if (scenario == 7) s.disk_keys = 1u | (1u << 8); // mixed rows overwrite shared staging
+        if (scenario == 8) { s.ram = false; s.spares = 3; }
+        if (scenario == 9) { s.spares = 3; s.promote_min = 100; }
+        const auto original = f.run(s);
+        s.ahead = true;
+        const auto ahead = f.run(s);
+        same_schedule_result(original, ahead);
+        // Changing the layer and retaining the plan storage must not leave a previous fetch decision live.
+        const auto next = f.run(s, 1, false);
+        for (int t = 0; t < T; ++t) for (int i = 0; i < K; ++i) {
+            if ((next.requests[t].cpu_mask >> i) & 1u) continue;
+            expect(std::memcmp(next.bytes.data() + (t * K + i) * f.blob,
+                               f.host + (NE + ids[t][i]) * f.blob, f.blob) == 0,
+                   "route-ahead next layer reads its own weights");
+        }
+    }
+    Settings s; s.ahead = true; s.reuse = true; f.reset(s);
+    f.route(0); f.route(1);
+    const auto before = download(f.scratch, T * K * f.blob);
+    expect(std::all_of(before.begin(), before.end(), [](uint8_t c) { return c == 0xa5; }),
+           "RAM-only rows really defer copies until every helper request can be issued");
+    if (T == 3) f.route(2);
+    f.finish_fetches();
+    const auto plans = download(f.plans, T * K);
+    for (int t = 0; t < T; ++t) for (int i = 0; i < K; ++i) {
+        const auto bytes = download((uint8_t*) plans[t * K + i], f.blob);
+        expect(std::memcmp(bytes.data(), f.host + ids[t][i] * f.blob, f.blob) == 0,
+               "deferred fetches complete before aliased weights are consumed");
+    }
+    // Reuse row-private sequence cells without resetting them: a disk row's nonzero flag must be overwritten
+    // by the next route, including the aborted-route path.
+    s.ram = false; s.staging = true; f.reset(s);
+    for (int t = 0; t < T; ++t) f.route(t);
+    CK(cudaMemset(f.skip, 1, sizeof(int))); gf::set_skip(f.skip);
+    const auto skipped = f.route(0); gf::set_skip(nullptr);
+    expect(skipped.fetch_mask == 0 && skipped.miss_mask == 0 && skipped.reuse_mask == 0,
+           "route-ahead aborted row clears all fetch decisions");
+    expect(download(f.row(0).wait_seq, 1)[0] == 0, "aborted row clears a stale disk sequence");
+    f.finish_fetches();
+    std::printf("T%d route-ahead: RAM/disk/staging/admission/reuse/stale-sequence checks complete\n", T);
+}
+
 std::vector<uint8_t> quantized(int type, int rows, int cols, std::mt19937& rng) {
     std::normal_distribution<float> nd(0.0f, 0.05f); std::vector<float> x((size_t) rows * cols);
     for (auto& v : x) v = nd(rng);
@@ -256,6 +353,16 @@ void test_arithmetic(int T) {
                std::any_of(off.begin(), off.end(), [](float v) { return v != 0.0f; }), "finite nontrivial expert output");
         expect(std::memcmp(off.data(), on.data(), off.size() * sizeof(float)) == 0,
                "independent scratch vs aliased grouped expert output is bitwise identical");
+        for (bool staging : {false, true}) {
+            Settings a; a.reuse = true; a.staging = staging;
+            if (staging) a.disk_keys = 1u | (1u << 8);
+            const auto base_routes = f.run(a); const auto base = grouped(f, gu_type, down_off);
+            a.ahead = true;
+            const auto early_routes = f.run(a); const auto early = grouped(f, gu_type, down_off);
+            same_schedule_result(base_routes, early_routes);
+            expect(std::memcmp(base.data(), early.data(), base.size() * sizeof(float)) == 0,
+                   "route-ahead grouped arithmetic is bitwise identical, including shared disk staging");
+        }
         std::printf("T%d grouped arithmetic: gu_type=%d down=23, %zu float outputs compared bitwise\n", T, gu_type, off.size());
     }
 }
@@ -264,7 +371,7 @@ int main() {
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) { std::puts("SKIP: CUDA GPU required"); return 77; }
     CK(cudaSetDevice(0));
-    for (int rows : {2, 3}) { test_routes(rows); test_arithmetic(rows); }
+    for (int rows : {2, 3}) { test_routes(rows); test_route_ahead(rows); test_arithmetic(rows); }
     expect(gf::launch_errors() == 0, "no kernel launch failures");
     std::printf("glm_window_fetch_reuse_test: %s (%d failures)\n", failures ? "FAILED" : "ok", failures);
     return failures ? 1 : 0;
