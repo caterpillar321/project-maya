@@ -1,5 +1,6 @@
 // Home GPU integration test. Run only with the explicit remote stage configuration and the real unchanged pack.
 #include "strata/core/glm_model.hpp"
+#include "../src/core/glm_fast_state.hpp"
 #include "strata/platform/env_alias.hpp"
 #include <algorithm>
 #include <cmath>
@@ -33,6 +34,57 @@ void compare(const float* reference, const float* result, size_t n, const char* 
     std::fflush(stdout);
     require(max_abs <= 0.005 && relative <= 1e-4 && same_pick, std::string("logits mismatch: ")+label);
 }
+}
+namespace strata::core {
+// Exercise the actual GPU table/move retirement, not a mock of the admission predicate.
+struct GlmStageCacheRegression {
+    static void late_promotion(Glm5Model& model) {
+        auto* f = model.fast_;
+        if (!f->stage_ram_canonical) return;
+        std::string err;
+        cudaSetDevice(model.dev_);
+        require(model.fast_boundary(err), err);
+        f->bg_hold = true;
+        require(cudaStreamSynchronize(f->copy) == cudaSuccess && model.fast_boundary(err), err);
+        require(f->bg.empty() && f->draining.empty(), "idle cache regression setup");
+        const int ne = model.g_.n_expert;
+        for (int il = model.l0_; il < model.lt_; ++il) {
+            auto& p = f->lp[(size_t)il];
+            int live = -1, spare = -1, sj = -1;
+            for (int s = 0; s < p.n; ++s)
+                if (p.st[s] == Glm5Model::FastState::kResident && p.key[s] >= 0 &&
+                    f->slot_of[(size_t)il*ne+p.key[s]] == s && f->held_ram_slot(il, il*ne+p.key[s]) >= 0) { live=s; break; }
+            for (int j=0;j<kernels::glmf::kSpares;++j) if (p.spare[j]>=0) {spare=p.spare[j];sj=j;break;}
+            if (live<0 || spare<0) continue;
+            const int key=il*ne+p.key[live], rc=f->layer_rc[il], rs=f->ram_of[key];
+            auto& r=f->rc[rc];
+            const unsigned long long zero=0;
+            require(cudaMemcpy(f->tab+f->spare_key(il,sj), &zero, sizeof(zero), cudaMemcpyHostToDevice)==cudaSuccess,
+                    "withdraw simulated background destination from spares");
+            p.spare[sj]=-1;p.st[spare]=Glm5Model::FastState::kLanding;p.key[spare]=-1;
+            r.st[rs]=Glm5Model::FastState::kRPin;
+            cudaEvent_t event;
+            require(cudaEventCreateWithFlags(&event,cudaEventDisableTiming)==cudaSuccess,"background copy event");
+            require(cudaMemcpyAsync(p.slot_ptr(spare),r.base+(size_t)rs*r.stride,f->L[il].blob,
+                                    cudaMemcpyHostToDevice,f->copy)==cudaSuccess,"late duplicate copy");
+            require(cudaEventRecord(event,f->copy)==cudaSuccess && cudaEventSynchronize(event)==cudaSuccess,
+                    "complete the late promotion after foreground already owns a slot");
+            f->bg.push_back({il,spare,key,rc,rs,true,event});
+            require(model.fast_boundary(err),err);
+            unsigned long long gpu=0;
+            require(cudaMemcpy(&gpu,f->tab+f->tab_key(key),sizeof(gpu),cudaMemcpyDeviceToHost)==cudaSuccess,"read live GPU mapping");
+            require(f->slot_of[key]==live && p.st[live]==Glm5Model::FastState::kResident &&
+                    p.st[spare]==Glm5Model::FastState::kFree && gpu==(unsigned long long)p.slot_ptr(live),
+                    "late background promotion cannot replace or duplicate the foreground slot");
+            require(r.st[rs]==Glm5Model::FastState::kRHold && f->ram_of[key]==rs,"retain canonical RAM after discarded promotion");
+            f->bg_hold=false;
+            require(model.fast_boundary(err),err);
+            std::puts("LATE BACKGROUND PROMOTION REGRESSION PASS");
+            return;
+        }
+        require(false,"regression needs one resident backed expert and one spare");
+    }
+};
 }
 int main(int argc, char** argv) {
     strata::platform::env_aliases();
@@ -146,6 +198,7 @@ int main(int argc, char** argv) {
         require(model.forward({t}, logits, err), err);
         reference.push_back(std::move(logits));
     }
+    if (!local_diag) strata::core::GlmStageCacheRegression::late_promotion(model);
     if (std::getenv("MAYA_STAGE_PREFILL_DIAG")) {
         for (int n : {1, 2, 16, 33}) {
             model.reset();
@@ -416,6 +469,18 @@ int main(int argc, char** argv) {
     require(model.decode_mtp(sampler, 24, [&](int) { return ++callbacks < 7; }, produced, err), err);
     require(produced == 7 && model.position() == (int64_t) prefix.size()+6, "decode callback cancellation drains stages");
     require(model.snapshot_save(), "snapshot allowed after cancelled generation");
+    // Failed/pending stages must not restore a checkpoint over an uncommitted remote window.
+    model.reset();
+    require(model.forward(prefix, logits, err), err);
+    const auto checkpoint_head = logits;
+    require(model.ckpt_save(0, err), err);
+    int32_t pending_picks[2];
+    require(model.window(tokens.data(), 2, pending_picks, err), err);
+    require(!model.ckpt_restore(0, err) && model.stage_window_pending(),
+            "checkpoint restore refuses a pending stage without mutating it");
+    model.reset();
+    require(model.forward(prefix, logits, err), err);
+    compare(checkpoint_head.data(), logits.data(), V, "reset after refused checkpoint restore");
     if (context >= 256) long_native_greedy();
     model.fast_prof_flush();
     std::printf("glm_remote_model_test: PASS (%d checks; T2/T3 every keep, pool boundaries, snapshot, MTP)\n", checks);

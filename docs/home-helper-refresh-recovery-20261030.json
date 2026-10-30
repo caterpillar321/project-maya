@@ -1,0 +1,158 @@
+{
+  "date": "2026-10-30",
+  "base_commit": "a1d313b5e92e87c49b0b81ab835e7f5b28e77473",
+  "branch": "codex/helper-refresh-recovery",
+  "protocol_version": 5,
+  "report": "/home/caterpillar/Agent/maya-dual-host-design-20261029/BUG-helper-refresh-stage-stuck-20261030.md",
+  "original_run": "/home/caterpillar/fn/remote-prefill-runs/20261030-134707-219753",
+  "reproduction": {
+    "run": "/home/caterpillar/fn/remote-stage-refresh-repro-20261030a",
+    "binary": "maya-resident-overlap-20261030",
+    "stress_setting": "MAYA_GLM_RAM_FREE=100 on main; existing canonical source copies can be evicted by the old cache policy",
+    "result": "Successful first 256-token answer, incomplete source coverage during refresh, then SIGSEGV on the next request",
+    "gdb_stack": [
+      "Glm5Model::lane_experts",
+      "Glm5Model::fast_cpu_experts",
+      "Glm5Model::fast_service"
+    ],
+    "main_cpu_lane": 0,
+    "core_dump_available": false,
+    "gdb_log": "/home/caterpillar/fn/refresh-repro-gdb.txt"
+  },
+  "fix": [
+    "Discard completed background promotions superseded by a newer foreground resident; a delayed demotion cannot clear the newer device mapping. Retire unindexed resident duplicates before spare eviction or prefill lending.",
+    "Preserve authoritative canonical RAM copies through promotion, garbage collection and cache pressure; prompt lending cannot evict another canonical source.",
+    "Validate source coverage and the entire swap plan before changing helper ownership. Pre-mutation rejection skips only the optional refresh.",
+    "Publish ownership after each completed canonical exchange; poison further inference on a failed mutating exchange.",
+    "Guard CPU routes with no CPU worker pool, reject checkpoint restore on failed/pending stages, invalidate cached request state and reset after stage faults."
+  ],
+  "native_validation": {
+    "run": "/home/caterpillar/fn/remote-stage-refresh-test-20261030b",
+    "checks": 21838785,
+    "logit_comparisons": 141,
+    "nonzero_comparisons": 0,
+    "source_coverage_errors": 0,
+    "refresh_skips": 0,
+    "stress_setting": "MAYA_GLM_RAM_FREE=100",
+    "fixture_note": "Backported fd25bb5 snapshot fixture fix: replay final prompt token after snapshot restore, as logits/last_tok are not snapshot state. Added pending checkpoint-restore rejection and reset parity case.",
+    "gpu_race_regression": "PASS: simulated completed background H2D after foreground admission; original primary slot/GPU table preserved, late slot reclaimed, canonical RAM preserved."
+  },
+  "http_validation": {
+    "run": "/home/caterpillar/fn/remote-stage-refresh-http-20261030b",
+    "injection": "GDB returns false once from fast_helper_adapt before mutation with unchanged=true; no production fault-injection environment flag added.",
+    "requests": [
+      {
+        "usage": {
+          "prompt_tokens": 3159,
+          "completion_tokens": 256,
+          "total_tokens": 3415,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish": "length"
+      },
+      {
+        "usage": {
+          "prompt_tokens": 3170,
+          "completion_tokens": 256,
+          "total_tokens": 3426,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish": "length"
+      },
+      {
+        "usage": {
+          "prompt_tokens": 3172,
+          "completion_tokens": 16,
+          "total_tokens": 3188,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish": "length"
+      },
+      {
+        "usage": {
+          "prompt_tokens": 16,
+          "completion_tokens": 16,
+          "total_tokens": 32,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "finish": "length"
+      }
+    ],
+    "result": "All four HTTP requests succeed, one refresh skipped, later real 128-expert refresh succeeds, no stuck-stage errors or crash.",
+    "stress_setting": "MAYA_GLM_RAM_FREE=100"
+  },
+  "release": {
+    "main_binary_sha256": "e7e18e2d1554c11d5025be210b127baeb547c426b9c99751c4cd0646ef9328cc",
+    "worker_binary_sha256": "f6eef0d6a37b4f700cbc6729b04380c27e211909f7ebee421ade6f1da3f24f6f",
+    "manifest": "/home/caterpillar/fn/maya-config/helper-refresh-recovery-v2-20261030",
+    "active_run": "/home/caterpillar/fn/remote-prefill-runs/20261030-145439-259483",
+    "main_cpu_lane": 0,
+    "helper_cpu_lane": 6,
+    "demand_dma": false,
+    "block_mtp": false,
+    "quantization": "unchanged IQ4_XS",
+    "stress_or_replay_flags": false
+  },
+  "limits": "The original run did not log the missing source key. Cache pressure reproduced the same failure and crash path. A GPU/weight-copy failure after mutation remains fatal to inference; the fix does not silently continue with potentially invalid weights.",
+  "initial_fix_trial": {
+    "run": "/home/caterpillar/fn/remote-prefill-runs/20261030-143225-244442",
+    "first_agentcode": {
+      "requests": 19,
+      "tokens": 7823,
+      "weighted_tok_s": 44.7,
+      "engine_errors": 0,
+      "helper_refreshes": 10
+    },
+    "second_agentcode": {
+      "requests": 20,
+      "tokens": 8577,
+      "weighted_tok_s": 46.7,
+      "engine_errors": 0,
+      "refresh_skips": 11
+    },
+    "result": "Rejected: crash protection worked, but stale primary duplicates still prevented subsequent refreshes.",
+    "failing_source": "key=5315 ram=0 state=1 vram=-1"
+  },
+  "agentcode_validation": [
+    {
+      "attempt": 1,
+      "wall_seconds": 269.9271270880017,
+      "requests": 29,
+      "engine_errors": 0,
+      "helper_refreshes": 13,
+      "harness_report": "turn   28.4s tools  3  이 폴더에 stats.py를 만들어서 명령행\nturn  114.4s tools 12  todo.py를 만들어줘: JSON 파일(t\nturn  127.0s tools 14  todo.py에 우선순위(high/mediu\nrequests 29, tokens 7940, weighted 45.3 tok/s, min 40.1 max 52.8\nper request: 514@47.0 28@51.9 117@50.3 1038@45.3 672@43.8 282@41.8 23@47.5 92@44.8 296@40.1 463@44.0 83@46.7 115@44.3 106@47.7 140@49.7 146@44.7 1171@47.0 112@44.2 46@42.8 1131@44.8 143@45.7 224@45.8 114@45.0 199@46.6 114@42.6 121@46.4 114@42.8 89@45.5 114@42.2 133@52.8\n"
+    },
+    {
+      "attempt": 2,
+      "wall_seconds": 258.9835575670004,
+      "requests": 28,
+      "engine_errors": 0,
+      "helper_refreshes": 15,
+      "harness_report": "turn   30.1s tools  4  이 폴더에 stats.py를 만들어서 명령행\nturn  111.8s tools 13  todo.py를 만들어줘: JSON 파일(t\nturn  117.0s tools 11  todo.py에 우선순위(high/mediu\nrequests 28, tokens 7930, weighted 46.6 tok/s, min 41.5 max 56.5\nper request: 538@48.1 26@56.5 28@55.1 115@51.8 1079@47.0 648@45.3 144@44.5 29@41.5 130@44.8 83@52.9 308@42.6 590@44.8 13@52.0 227@44.2 83@54.4 208@51.5 12@46.2 1201@45.2 210@46.3 13@51.7 1109@47.4 15@51.1 88@46.2 177@45.0 100@46.3 463@45.2 83@49.5 210@51.5\n"
+    }
+  ],
+  "final_health": {
+    "active_run": "/home/caterpillar/fn/remote-prefill-runs/20261030-145439-259483",
+    "post_validation_short_request": {
+      "prompt_tokens": 16,
+      "completion_tokens": 16,
+      "total_tokens": 32,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "completed_helper_refreshes": 29,
+    "source_coverage_errors": 0,
+    "refresh_skips": 0,
+    "engine_errors": 0
+  },
+  "validation_status": "passed"
+}

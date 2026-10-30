@@ -1649,16 +1649,17 @@ static int glm_pack_generate(const Options& o) {
     // extends (one may have been the poisoned state's source) are dropped and the model is reset, so the server's
     // retry reads the prompt from token 0.  The ERR line names it "non-finite" (Glm5Model::route_ok's words).
     const auto drop_if_poisoned = [&](const std::vector<int32_t>& prompt, const std::string& why) {
-        if (why.find("non-finite") == std::string::npos) return;
+        const bool stage_fault = model.stage_faulted();
+        if (!stage_fault && why.find("non-finite") == std::string::npos) return;
         snap_tokens.clear();
         snap_in_slot = false;
         ckpt_drop_past(0);
         for (size_t i = slots.size(); i-- > 0;) {
             const auto& t = slots[i].tokens;
-            if (t.size() <= prompt.size() && std::equal(t.begin(), t.end(), prompt.begin())) slot_drop(i);
+            if (stage_fault || (t.size() <= prompt.size() && std::equal(t.begin(), t.end(), prompt.begin()))) slot_drop(i);
         }
         model.reset();
-        std::fprintf(stderr, "glm nan guard: %s - this conversation's state is dropped; it is read again from token 0\n",
+        std::fprintf(stderr, "glm request recovery: %s - cached state is dropped; the next request reads from token 0\n",
                      why.c_str());
     };
     const auto prep_prompt = [&](const std::vector<int32_t>& prompt, size_t& reuse, const char*& finish,
@@ -2218,6 +2219,7 @@ static int glm_pack_generate(const Options& o) {
         if (helper_refresh && helper_after && produced >= 128 && std::strcmp(finish, "cancel") != 0 && !pause_req.load()) {
             if (!model.refresh_stage_helper(err)) {
                 std::fprintf(stderr, "stage helper refresh after response: %s\n", err.c_str());
+                drop_if_poisoned(prompt, err);
                 return 1;
             }
         }
