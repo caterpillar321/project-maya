@@ -1742,6 +1742,7 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
             for (int s2 = 0; s2 < R.n && rs < 0; ++s2)
                 if (R.st[(size_t) s2] == FastState::kRFree) rs = s2;
             if (rs < 0) {
+                if (F->stage_ram_canonical) return false; // never evict another authoritative source
                 if (F->backing_keep) {
                     // Reclaim redundant weights before a unique source. Earlier parked keys are protected even
                     // when a GPU table entry has not yet been cleared by this lending loop.
@@ -1786,6 +1787,14 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
         for (int il = l0_; il < lt_; ++il) {
             if (!F->L[(size_t) il].moe) continue;
             auto& P = F->lp[(size_t) il];
+            // A superseded primary copy is not a canonical source to park or relocate. In particular,
+            // parking it after its expert moved to the helper would recreate a forbidden RAM duplicate.
+            for (int s = 0; s < P.n; ++s)
+                if (P.st[(size_t) s] == FastState::kResident && P.key[(size_t) s] >= 0 &&
+                    F->slot_of[(size_t) il * NE + P.key[(size_t) s]] != s) {
+                    P.st[(size_t) s] = FastState::kFree;
+                    P.key[(size_t) s] = -1;
+                }
             // the layer's main-slot residents, coldest first: a lent slot's expert moves over the coldest one that is
             // colder than it (a device copy) - the prompt costs the decode its coldest experts, not whichever sat in
             // the borrowed tail (a chat turn used to drop up to ~145 warm experts to disk)

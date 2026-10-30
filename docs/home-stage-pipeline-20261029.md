@@ -391,3 +391,58 @@ RAM fetch는 모두36.066/출력토큰, 앞단 예측 재사용률은89.557%, �
 `~/fn/start-maya-remote-prefill.sh`도 새 버전을 시작합니다. 배포 설정은
 `~/fn/maya-config/resident-overlap-20261030`, 활성 실행은
 `~/fn/remote-prefill-runs/20261030-094610-93639`입니다.
+
+
+## 2026-10-30 운영 수정: helper refresh 실패와 SIGSEGV
+
+운영 `a1d313b`에서 응답 뒤 helper 교체가 `incomplete source coverage`로 실패하고,
+후속 prefill 오류와 SIGSEGV로 이어졌습니다. 기존 운영 바이너리에 main `MAYA_GLM_RAM_FREE=100`을
+설정해 같은 실패와 크래시를 재현했습니다. GDB의 실패 스택은
+`lane_experts → fast_cpu_experts → fast_service`였으며, main CPU lane0에서 없는 CPU pool을
+역참조하는 경로였습니다. OOM으로 확인된 사건이 아닙니다.
+
+두 문제가 연결됐습니다. 캐시 계층의 선택적 RAM 복사본 회수 규칙이 stage의 필수 원본 보존과
+충돌할 수 있었고, background promotion이 끝나기 전에 foreground가 같은 전문가를 다른 슬롯에
+올리면 늦은 background 완료가 최신 mapping을 덮었습니다. 이 중복 resident의 퇴출/프리필 lending은
+다른 유효 mapping을 지우거나 helper가 소유한 전문가를 RAM에 다시 중복 생성할 수 있었습니다.
+초기 방어 수정본은 크래시 없이 두 실행을 끝냈지만 두 번째에서 key5315/ram0/state1/vram-1로
+재배치를11회 건너뛰었습니다. 이를 완료로 처리하지 않고 캐시 이동 경쟁을 추가 수정했습니다.
+
+이전 refresh는 host 소유권을 바꾸고 **그 뒤** 원본을 검사했으며, 실패하면 GPU 소유권 표를
+갱신하지 않고 반환했습니다. `stage_failed_`만 reset해도 이 소유권 불일치는 복구되지 않습니다.
+다음 라우팅이 이미 helper에서 빠진 전문가를 CPU로 보내면서 CPU pool0인 main에서 충돌했습니다.
+
+수정 내용:
+
+- Canonical RAM은 일반 victim/GC/승격 정리에서 회수하지 않습니다. 프리필 lending도 다른
+  canonical 원본을 덮어쓰지 않습니다.
+- 늦은 background 승격은 더 최신 foreground slot이 있으면 목적 슬롯을 폐기합니다. 늦은
+  강등도 새 GPU mapping을 지우지 않습니다. 퇴출과 lending은 mapping 없는 중복 resident를 정리합니다.
+- 원본 coverage와 swap 계획 전체를 변경 전에 검사합니다. 변경 전 거부는 optional refresh만
+  건너뛰며 유효한 대화 상태는 유지합니다. 완료된 교체마다 GPU 소유권도 반영합니다.
+- CPU pool 없는 CPU 계산을 오류로 처리하며 GPU 대기는 정상 종료합니다. 실패/미완료 stage의
+  checkpoint restore를 거부하고, 요청 실패 후 캐시 상태를 폐기하고 reset합니다.
+- 교체 중 CUDA/가중치 복사 오류처럼 안전한 계속 실행을 보장할 수 없는 실패는 inference 오류로
+  유지합니다. 오류를 숨긴 채 잠재적으로 잘못된 가중치를 사용하지 않습니다.
+
+검증:
+
+- 실제 GPU에서 foreground가 이미 승격한 뒤 background H2D 완료를 인위적으로 만들었습니다.
+  최신 host/GPU table 보존, 늦은 슬롯 회수, canonical RAM 유지 검사를 통과했습니다.
+- RAM_FREE100 조건의 native integration **21,838,785 checks**, logits141회 비교 모두 최대 절대차0.
+  Pending checkpoint restore 거부 후 reset의 출력 일치도 확인했습니다.
+- GDB로 변경 전 실패를 한 번 주입했습니다. 첫 refresh만 건너뛰고 이후 실제128개 교체와
+  후속 긴 요청·`1+1?` 요청이 모두 성공했습니다. production에 주입용 환경변수를 추가하지 않았습니다.
+- 변경하지 않은 클로드 `agentcode-log.py`의 Pi 코딩3턴을 같은 엔진에서 두 번 연속 실행했습니다.
+  **29요청/7,940토큰/45.3tok/s**, **28요청/7,930토큰/46.6tok/s**. 총57요청 오류0,
+  마지막 응답 뒤 작업까지 기다리고 확인한 helper refresh29회, 건너뛰기0, coverage 오류0.
+- 최종 짧은 HTTP 요청도 성공했습니다. 두 하네스의 출력/요청 수는 과거 실행과 다르므로
+  기존44.7tok/s 대비 수치를 동일 출력 A/B의 향상률로 해석하지 않습니다.
+
+현재 운영은 `a1d313b`에서 분기한 `codex/helper-refresh-recovery` 수정본이며 protocol v5입니다.
+main CPU0 / front CPU6, 기존 resident-overlap, DMA off, IQ4_XS를 유지합니다.
+블록 MTP와 protocol v7 실험은 이번 운영 바이너리에 포함하지 않았습니다.
+런처는 `maya-config/helper-refresh-recovery-v2-20261030` 및
+`bin/maya-refresh-recovery-v2-20261030`을 사용합니다. 검증된 실행은
+`~/fn/remote-prefill-runs/20261030-145439-259483`이며 강제 출력·RAM_FREE100·GDB를 제거했습니다.
+수치, SHA256, GDB/검증 경로는 `home-helper-refresh-recovery-20261030.json`에 있습니다.

@@ -2817,20 +2817,61 @@ bool Glm5Model::refresh_stage_helper(std::string& err) {
     const uint64_t before = F->helper_swaps;
     const char* limit = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_MAX");
     const int max_swaps = limit ? std::max(0, std::min(256, std::atoi(limit))) : 128;
-    if (!fast_helper_adapt(err, true, max_swaps)) { stage_failed_ = true; return false; }
+    bool unchanged = false;
+    if (!fast_helper_adapt(err, true, max_swaps, &unchanged)) {
+        if (unchanged) {
+            // Optional placement optimization declined before any ownership/weight mutation. The two
+            // stages are already idle; resetting their conversation would only destroy valid reuse.
+            std::fprintf(stderr, "glm stage helper refresh skipped (ownership unchanged): %s\n", err.c_str());
+            err.clear();
+            return true;
+        }
+        F->helper_error = "GLM helper refresh failed after mutation: " + err;
+        F->helper_failed.store(true, std::memory_order_release);
+        stage_failed_ = true;
+        return false;
+    }
     std::fprintf(stderr, "glm stage helper refresh: %llu replacements after prefill, %.3f ms; "
                          "ownership fixed throughout decode\n", (unsigned long long) (F->helper_swaps - before),
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
     return true;
 }
 
-bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_swaps) {
+bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_swaps, bool* unchanged) {
     FastState* F = fast_;
+    if (unchanged) *unchanged = false;
     // Stage sessions use the agreed fixed expert ownership. Moving an expert between the trunk and helper
     // changes its activation/reduction path, so a reset/replay can otherwise change the verifier's arithmetic.
     // The legacy single-trunk policy is unchanged; a future stage replan needs an explicit synchronized epoch.
     if (stage_windows_enabled_ && !stage_refresh) return true;
     if (F->helper.device() < 0 || F->bg_hold) return true;
+    const auto coverage = [&] {
+        if (!stage_refresh || !F->stage_ram_canonical) return true;
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe) continue;
+            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            for (int e = 0; e < g_.n_expert; ++e) {
+                const int key = il * g_.n_expert + e, rs = F->ram_of[(size_t) key];
+                const bool cpu = !F->cpu_owned.empty() && F->cpu_owned[(size_t) key];
+                const bool valid = rs >= 0 && rs < R.n;
+                if (F->helper.owns(key) ? rs >= 0 :
+                    (!valid || R.key[(size_t) rs] != key ||
+                     R.st[(size_t) rs] != (cpu ? FastState::kRHelper : FastState::kRHold))) {
+                    err = "GLM canonical helper exchange: incomplete source coverage (key=" + std::to_string(key) +
+                          ", ram=" + std::to_string(rs) + ", state=" +
+                          std::to_string(valid ? (int) R.st[(size_t) rs] : -1) + ", vram=" +
+                          std::to_string(F->slot_of[(size_t) key]) + ", ram_key=" +
+                          std::to_string(valid ? R.key[(size_t) rs] : -1) + ", helper=" +
+                          std::to_string(F->helper.owns(key)) + ")";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    // This used to run only AFTER replacing experts. A failed check then left the host helper map
+    // changed but its GPU map old, routing removed helper experts into a nonexistent CPU pool.
+    if (!coverage()) { if (unchanged) *unchanged = true; return false; }
     auto primary = F->slot_of;
     for (const auto& m : F->bg) if (m.up) primary[(size_t) m.key] = m.vslot;
     // A pending RAM read/copy is not a candidate until it lands.
@@ -2856,6 +2897,18 @@ bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_
     const char* wide_env = getenv("STRATA_GLM_STAGE_HELPER_REFRESH_WIDE");
     const bool wide = stage_refresh && wide_env && std::atoi(wide_env) != 0;
     const auto swaps = F->helper.swaps(stage_refresh ? recent : F->cnt, primary, g_.n_expert, max_swaps, !wide);
+    if (F->stage_ram_canonical) for (const auto& s : swaps) {
+        const int il = s.in / g_.n_expert, rs = F->ram_of[(size_t) s.in];
+        const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+        if (!stage_refresh || s.out / g_.n_expert != il || rs < 0 || rs >= R.n ||
+            R.key[(size_t) rs] != s.in || R.st[(size_t) rs] != FastState::kRHold ||
+            F->ram_of[(size_t) s.out] >= 0 || F->slot_of[(size_t) s.in] >= 0 ||
+            F->slot_of[(size_t) s.out] >= 0 || F->L[(size_t) il].blob > F->stage_bytes) {
+            err = "GLM canonical helper exchange: unsettled or overlapping sources";
+            if (unchanged) *unchanged = true;
+            return false;
+        }
+    }
     for (const auto& s : swaps) {
         if (!F->net_of.empty() && F->net_of[(size_t) s.in] != 0) continue;   // already on a net helper
         const int il = s.in / g_.n_expert;
@@ -2896,6 +2949,13 @@ bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_
                                  "canonical helper incoming RAM entry", err) ||
                 !glmfast::cuda_ok(cudaMemcpy(F->tab + F->rtab_key(s.out), &ptr, sizeof(ptr), cudaMemcpyHostToDevice),
                                  "canonical helper outgoing RAM entry", err)) return false;
+            // Commit the device ownership alongside each completed RAM/helper exchange. A later
+            // failure must not leave earlier successful swaps invisible to the GPU route kernel.
+            const uint8_t no = 0, yes = 1;
+            if (!glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d + s.out, &no, 1, cudaMemcpyHostToDevice),
+                                 "canonical helper outgoing owner", err) ||
+                !glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d + s.in, &yes, 1, cudaMemcpyHostToDevice),
+                                 "canonical helper incoming owner", err)) return false;
             ++F->helper_swaps;
             continue;
         }
@@ -2920,21 +2980,7 @@ bool Glm5Model::fast_helper_adapt(std::string& err, bool stage_refresh, int max_
         }
         ++F->helper_swaps;
     }
-    if (stage_refresh && F->stage_ram_canonical) {
-        for (int il = l0_; il < lt_; ++il) {
-            if (!F->L[(size_t) il].moe) continue;
-            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
-            for (int e = 0; e < g_.n_expert; ++e) {
-                const int key = il * g_.n_expert + e, rs = F->ram_of[(size_t) key];
-                const bool cpu_owned = !F->cpu_owned.empty() && F->cpu_owned[(size_t) key];
-                if (F->helper.owns(key) ? rs >= 0 :
-                    (rs < 0 || R.key[(size_t) rs] != key ||
-                     R.st[(size_t) rs] != (cpu_owned ? FastState::kRHelper : FastState::kRHold))) {
-                    err = "GLM canonical helper exchange: incomplete source coverage"; return false;
-                }
-            }
-        }
-    }
+    if (!coverage()) return false;
     return swaps.empty() || glmfast::cuda_ok(cudaMemcpy(F->helper_owned_d, F->owned_all().data(),
                          (size_t) F->n_keys, cudaMemcpyHostToDevice), "helper adapted ownership", err);
 }
@@ -3551,6 +3597,12 @@ void Glm5Model::win_lanes_stop() {
 void Glm5Model::fast_cpu_experts(int il, int ne, const uint8_t* const* blob, const float* w, const float* x, float* out) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
+    if (!F->cpu_pool) {
+        std::fill_n(out, g.n_embd, 0.0f);
+        F->helper_error = "GLM helper ownership mismatch: CPU route without a CPU pool";
+        F->helper_failed.store(true, std::memory_order_release);
+        return; // Retire the GPU wait and report the route failure, never dereference a null worker pool.
+    }
     const auto& Ly = F->L[(size_t) il];
     const auto& nf = F->cpu_fmt[(size_t) il];
     namespace kc = strata::kernels::cpu;
@@ -5428,7 +5480,8 @@ void Glm5Model::fast_service() {
                     }
                     // exclusive tiers: its RAM copy is released at the next boundary (the fetch reads it now)
                     const int rs = F->ram_of[(size_t) key];
-                    if (rs >= 0 && R.st[(size_t) rs] == FastState::kRHold) R.st[(size_t) rs] = FastState::kRRelease;
+                    if (!F->stage_ram_canonical && rs >= 0 && R.st[(size_t) rs] == FastState::kRHold)
+                        R.st[(size_t) rs] = FastState::kRRelease;
                 } else if (((fetch | miss | reuse) >> i) & 1u) {
                     F->scratch_uses.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -5482,7 +5535,8 @@ void Glm5Model::fast_service() {
                     for (int j = 0; j < gf::kSpares; ++j)
                         if (P1.spare[j] == s) P1.spare[j] = -1;
                     const int rs = F->ram_of[(size_t) key];
-                    if (rs >= 0 && R1.st[(size_t) rs] == FastState::kRHold) R1.st[(size_t) rs] = FastState::kRRelease;
+                    if (!F->stage_ram_canonical && rs >= 0 && R1.st[(size_t) rs] == FastState::kRHold)
+                        R1.st[(size_t) rs] = FastState::kRRelease;
                     F->prefetches.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -6333,6 +6387,9 @@ bool Glm5Model::fast_boundary(std::string& err) {
         return (uint64_t) (v ? std::max(0, std::atoi(v)) : 64) * 42u;
     }();
     const auto ram_victim = [&](const FastState::RamClass& R) -> int {
+        // Canonical RAM is authoritative storage, not an optional duplicate cache. Its slots are
+        // replaced only by the idle same-layer helper transaction, never by cache pressure.
+        if (F->stage_ram_canonical) return -1;
         // Reclaim a redundant primary-GPU backing before any unique RAM copy. Prefer recent arrivals so an older
         // backing, whose VRAM slot is nearer LRU eviction, can still avoid a D2H. Only settled slots are eligible.
         if (F->backing_keep) {
@@ -6387,8 +6444,9 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 const int ro = key >= 0 ? F->ram_of[(size_t) key] : -1;
                 // All of the preceding token/window has completed. A keyed release source can now become a
                 // settled canonical backing. Disk-read staging that already discarded its key stays unchanged.
-                if (key >= 0 && F->backing_layer(key / g.n_expert) && F->vram_held(key, g.n_expert) &&
-                    (ro == s || ro < 0) && backed < R.backing_slots) {
+                if (key >= 0 && F->backing_layer(key / g.n_expert) &&
+                    (F->stage_ram_canonical || F->vram_held(key, g.n_expert)) &&
+                    (ro == s || ro < 0) && (F->stage_ram_canonical || backed < R.backing_slots)) {
                     R.st[(size_t) s] = FastState::kRHold;
                     F->ram_of[(size_t) key] = s;
                     upd(F->rtab_key(key), (unsigned long long) (R.base + (size_t) s * R.stride));
@@ -6412,7 +6470,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 const int key = R.key[(size_t) s];
                 const int ro = key >= 0 ? F->ram_of[(size_t) key] : -1;
                 if (key >= 0 && ro == s && F->backing_layer(key / g.n_expert) &&
-                    F->vram_held(key, g.n_expert)) continue;
+                    (F->stage_ram_canonical || F->vram_held(key, g.n_expert))) continue;
                 if (key >= 0 && ro == s && F->slot_of[(size_t) key] < 0) continue;   // the normal case
                 if (key >= 0 && ro < 0 && F->slot_of[(size_t) key] < 0) {
                     F->ram_of[(size_t) key] = s;
@@ -6444,7 +6502,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
         if (R.st[(size_t) d.rslot] == FastState::kRDemote && R.key[(size_t) d.rslot] == d.key) {
             // A route can re-promote the expert while this older demotion lands. That creates a new duplicate
             // after step (1), so its admission must obey the same cap as a normal promotion source.
-            const bool over_cap = F->backing_layer(d.il) && F->vram_held(d.key, g.n_expert) &&
+            const bool over_cap = !F->stage_ram_canonical && F->backing_layer(d.il) && F->vram_held(d.key, g.n_expert) &&
                                   F->ram_of[(size_t) d.key] == d.rslot &&
                                   F->backing_count(R, g.n_expert) >= R.backing_slots;
             if (over_cap) {
@@ -6475,11 +6533,19 @@ bool Glm5Model::fast_boundary(std::string& err) {
         for (int j = 0; j < gf::kSpares; ++j) {
             if (P.spare[j] >= 0) continue;
             int s = -1;
-            for (int s2 = 0; s2 < P.n; ++s2)
+            for (int s2 = 0; s2 < P.n; ++s2) {
+                // An old duplicate has no table entry. Reclaim its slot without deleting the newer
+                // primary mapping or demoting a copy of an expert now owned by the helper.
+                if (P.st[(size_t) s2] == FastState::kResident && P.key[(size_t) s2] >= 0 &&
+                    F->slot_of[(size_t) il * g.n_expert + P.key[(size_t) s2]] != s2) {
+                    P.st[(size_t) s2] = FastState::kFree;
+                    P.key[(size_t) s2] = -1;
+                }
                 if (P.st[(size_t) s2] == FastState::kFree) {
                     s = s2;
                     break;
                 }
+            }
             if (s >= 0) {
                 P.st[(size_t) s] = FastState::kSpare;
                 P.key[(size_t) s] = -1;
@@ -6600,7 +6666,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     // (4) a few free RAM slots per class for the next token's disk reads (and its reads ahead); RAM-resident
     // mode plans no disk reads, so no residents are evicted to keep landing room either
     static const char* kf = getenv("STRATA_GLM_RAM_FREE");
-    const int keep_free = F->ram_resident ? 0 : kf ? std::max(1, std::atoi(kf)) : F->ahead_read ? 12 : 4;
+    const int keep_free = (F->ram_resident || F->stage_ram_canonical) ? 0 : kf ? std::max(1, std::atoi(kf)) : F->ahead_read ? 12 : 4;
     for (auto& R : F->rc) {
         int nfree = 0;
         for (char c : R.st) nfree += c == FastState::kRFree;
@@ -6701,6 +6767,20 @@ bool Glm5Model::fast_boundary(std::string& err) {
             auto& P = F->lp[(size_t) m.il];
             auto& R = F->rc[(size_t) m.rclass];
             if (m.up) {
+                // A foreground fetch/prefetch can promote this key while the background H2D is
+                // in flight. Keep that newer live slot; admitting both creates an unindexed resident
+                // whose later eviction/lending can clear the real mapping or duplicate a helper source.
+                if (F->vram_held(m.key, NE) && F->slot_of[(size_t) m.key] != m.vslot) {
+                    P.st[(size_t) m.vslot] = FastState::kFree;
+                    P.key[(size_t) m.vslot] = -1;
+                    if (R.st[(size_t) m.rslot] == FastState::kRPin &&
+                        R.key[(size_t) m.rslot] == m.key && F->ram_of[(size_t) m.key] == m.rslot) {
+                        R.st[(size_t) m.rslot] = FastState::kRHold;
+                        upd(F->rtab_key(m.key), (unsigned long long) (R.base + (size_t) m.rslot * R.stride));
+                    }
+                    F->ev_free.push_back(m.ev);
+                    continue;
+                }
                 P.st[(size_t) m.vslot] = FastState::kResident;
                 P.key[(size_t) m.vslot] = m.key % NE;
                 P.tick[(size_t) m.vslot] = F->clock;
@@ -6708,7 +6788,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 upd(F->tab_key((size_t) m.key), (unsigned long long) P.slot_ptr(m.vslot));
                 const bool retain = F->backing_layer(m.il) && R.st[(size_t) m.rslot] == FastState::kRPin &&
                                     R.key[(size_t) m.rslot] == m.key && F->ram_of[(size_t) m.key] == m.rslot &&
-                                    F->backing_count(R, NE) < R.backing_slots;
+                                    (F->stage_ram_canonical || F->backing_count(R, NE) < R.backing_slots);
                 if (retain) {
                     R.st[(size_t) m.rslot] = FastState::kRHold;
                     upd(F->rtab_key((size_t) m.key), (unsigned long long) (R.base + (size_t) m.rslot * R.stride));
@@ -6722,8 +6802,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 }
                 ++F->bg_up;
             } else {
-                upd(F->tab_key((size_t) m.key), 0ull);
-                if (F->slot_of[(size_t) m.key] == m.vslot) F->slot_of[(size_t) m.key] = -1;
+                if (F->slot_of[(size_t) m.key] == m.vslot) {
+                    upd(F->tab_key((size_t) m.key), 0ull);
+                    F->slot_of[(size_t) m.key] = -1;
+                } // A newer foreground promotion owns both mappings; this old demotion must not clear either.
                 if (P.st[(size_t) m.vslot] == FastState::kDraining) {
                     P.st[(size_t) m.vslot] = FastState::kFree;
                     P.key[(size_t) m.vslot] = -1;
@@ -8809,6 +8891,10 @@ bool Glm5Model::ckpt_save(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_restore(int slot, std::string& err) {
+    if (stage_window_pending_ || stage_failed_) {
+        err = "glm stage: commit or reset before checkpoint restore";
+        return false;
+    }
     ckpt_join();
     if (remote_front_) {
         if (slot < 0 || slot >= (int)ckpt_pos_.size() || ckpt_pos_[slot] < 0) { err="remote checkpoint unavailable"; return false; }

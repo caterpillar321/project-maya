@@ -543,6 +543,7 @@ public:
     // ---- the fast path (src/core/glm_fast_path.cu)
     struct FastState;
     FastState* fast_ = nullptr;
+    friend struct GlmStageCacheRegression;
     bool fast_mode_ = false;                               // decided at load (STRATA_GLM_SLOW=1 turns it off)
     bool host_logits_ = true;
     int last_tok_ = -1;                                    // the greedy argmax of the last fast forward
@@ -641,7 +642,8 @@ public:
     bool fast_warm(std::string& err);                      // load-time: stream every expert into the tiers
     bool fast_cpu_lane_setup(std::string& err);            // STRATA_GLM_CPU_LANE: the pool, its calibration, the split
     bool fast_helper_setup(std::string& err);              // STRATA_GLM_EXPERT_HELPER: complementary GPU cache
-    bool fast_helper_adapt(std::string& err, bool stage_refresh = false, int max_swaps = 8);
+    bool fast_helper_adapt(std::string& err, bool stage_refresh = false, int max_swaps = 8,
+                           bool* unchanged = nullptr);
     void fast_cpu_experts(int il, int ne, const uint8_t* const* blob, const float* w, const float* x, float* out);
     // the same on `pool` with the rows act / hq / ff / dn, or x3 for an EXL3 pack (a verify window's CPU lanes:
     // FastState::win_lane, each with its own rows)
@@ -878,6 +880,7 @@ public:
                        size_t input_floats, std::vector<float>& output, std::string& err);
     bool stage_discard(std::string& err); // front-only: discard one uncommitted speculative token
     bool stage_window_pending() const { return stage_window_pending_; }
+    bool stage_faulted() const { return stage_failed_; }
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
     bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
     bool remote_front_enabled() const { return remote_front_ != nullptr; }
