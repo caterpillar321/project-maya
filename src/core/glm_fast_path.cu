@@ -4968,6 +4968,22 @@ void Glm5Model::fast_prof_flush() {
         const auto pf_used = F->window_prefetch_used.exchange(0);
         if (pf_issued) std::fprintf(stderr, "glm window prefetch: %llu experts issued, %llu used by next window layer\n",
                                    (unsigned long long) pf_issued, (unsigned long long) pf_used);
+        for (int r = 0; r < 8; ++r) {
+            const auto issued = F->window_prefetch_rank_issued[(size_t) r].exchange(0);
+            const auto used = F->window_prefetch_rank_used[(size_t) r].exchange(0);
+            if (issued) std::fprintf(stderr, "glm window prefetch rank %d: %llu issued, %llu selected next layer\n",
+                                     r + 1, (unsigned long long) issued, (unsigned long long) used);
+        }
+        const auto rank_updates = F->window_prefetch_rank_updates.exchange(0);
+        if (rank_updates) {
+            std::fprintf(stderr, "glm window prefetch adaptive: %llu updates; source-layer caps",
+                         (unsigned long long) rank_updates);
+            for (int il = m->l0_; il < m->l1_ && il < (int) F->window_prefetch_rank_cap.size(); ++il) {
+                const int cap = F->window_prefetch_rank_cap[(size_t) il].load(std::memory_order_relaxed);
+                if (cap) std::fprintf(stderr, " %d:%d", il, cap);
+            }
+            std::fprintf(stderr, "\n");
+        }
         for (size_t t = 1; t < F->stage_timing_n.size(); ++t) {
             const auto n = F->stage_timing_n[t];
             if (!n) continue;
@@ -5166,6 +5182,18 @@ void Glm5Model::fast_service() {
     const int K = g.n_exp_used;
     unsigned int next = 1;
     std::vector<uint8_t> prefetched_window_keys((size_t) F->n_keys, 0);
+    const bool prefetch_rank_audit = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH_RANK_AUDIT");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    const bool prefetch_rank_adapt = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH_ADAPT");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    struct PrefetchHistory {
+        unsigned eligible[4] = {}, selected[4] = {}, windows = 0, pending = 0;
+    };
+    std::vector<PrefetchHistory> prefetch_history(prefetch_rank_adapt ? F->L.size() : 0);
     // Idle (through a prompt, between requests) the thread polls the ring with sleeps instead of spinning: it held one
     // core per GPU at 100% while the server waited (2x V100: 200% CPU idle), a core a 6-core PC's prompt lane and the
     // system then lacked, and the server's stall watchdog could never see a stuck engine as idle.  A decode's routes
@@ -5400,6 +5428,8 @@ void Glm5Model::fast_service() {
                 const int key = il * g.n_expert + ids[i];
                 if (rq->win_n > 0 && prefetched_window_keys[(size_t) key]) {
                     F->window_prefetch_used.fetch_add(1, std::memory_order_relaxed);
+                    if (prefetch_rank_audit)
+                        F->window_prefetch_rank_used[(size_t) prefetched_window_keys[(size_t) key] - 1].fetch_add(1, std::memory_order_relaxed);
                     prefetched_window_keys[(size_t) key] = 0;
                 }
                 if (F->cnt[(size_t) key] < (1u << 24)) ++F->cnt[(size_t) key];
@@ -5443,6 +5473,29 @@ void Glm5Model::fast_service() {
                 // prediction quality: how many of this route's experts (and of its non-resident ones) the previous
                 // layer's prediction named
                 const auto& pv = F->pred_of[(size_t) il];
+                if (prefetch_rank_adapt && rq->win_n == 1 && rq->win_rows == 0 && il > l0_ &&
+                    il - 1 < (int) F->window_prefetch_rank_cap.size()) {
+                    auto& h = prefetch_history[(size_t) il];
+                    for (int rank = 0; rank < 4; ++rank) {
+                        if (!(h.pending & (1u << rank))) continue;
+                        bool selected = false;
+                        for (int j = 0; j < K; ++j) selected |= ids[j] == pv[(size_t) rank];
+                        ++h.eligible[rank]; h.selected[rank] += selected;
+                        if (h.eligible[rank] >= 256) {
+                            h.eligible[rank] >>= 1; h.selected[rank] >>= 1;
+                        }
+                    }
+                    if (++h.windows % 64 == 0) {
+                        int cap = 4;
+                        // Retain uncertain ranks until there are 32 cold-candidate observations. Shadow
+                        // observations include suppressed copies, so a layer can recover back to rank four.
+                        while (cap > 1 && h.eligible[cap-1] >= 32 &&
+                               100u * h.selected[cap-1] < 65u * h.eligible[cap-1]) --cap;
+                        if (F->window_prefetch_rank_cap[(size_t) il - 1].exchange(cap) != cap)
+                            F->window_prefetch_rank_updates.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    h.pending = 0;
+                }
                 if (pv[0] >= 0) {
                     uint64_t ov = 0, mh = 0;
                     for (int i = 0; i < K; ++i) {
@@ -5461,6 +5514,19 @@ void Glm5Model::fast_service() {
             }
             // the next layer's experts this route prefetched into that layer's spares: resident from now on
             const int npf = rq->pf_n;
+            if (prefetch_rank_adapt && il + 1 < (int) prefetch_history.size()) {
+                auto& next_history = prefetch_history[(size_t) il + 1];
+                next_history.pending = 0;
+                if (rq->win_n == 1 && rq->win_rows == 0) for (int rank = 0; rank < std::min(4, K); ++rank) {
+                    const int expert = rq->pred[rank];
+                    if (expert < 0 || expert >= g.n_expert) continue;
+                    const int key = (il + 1) * g.n_expert + expert;
+                    // Inspect host tier maps BEFORE applying this request's prefetch promotions. No extra
+                    // device readback or CPU thread; only eligible RAM candidates train the admission policy.
+                    if (F->slot_of[(size_t) key] < 0 && F->ram_of[(size_t) key] >= 0 && !F->aux_owns(key))
+                        next_history.pending |= 1u << rank;
+                }
+            }
             if (rq->win_n > 0 && rq->win >= rq->win_n - 1)
                 std::fill_n(prefetched_window_keys.data() + (size_t) il * g.n_expert, g.n_expert, uint8_t{0});
             if (npf > 0 && il + 1 < (int) F->lp.size()) {
@@ -5471,6 +5537,14 @@ void Glm5Model::fast_service() {
                     const int key = (il + 1) * g.n_expert + e;
                     if (rq->win_n > 0) {
                         prefetched_window_keys[(size_t) key] = 1;
+                        if (prefetch_rank_audit) {
+                            int rank = 0;
+                            while (rank < K && rq->pred[rank] != e) ++rank;
+                            if (rank < K) {
+                                prefetched_window_keys[(size_t) key] = (uint8_t) (rank + 1);
+                                F->window_prefetch_rank_issued[(size_t) rank].fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
                         F->window_prefetch_issued.fetch_add(1, std::memory_order_relaxed);
                     }
                     const int s = P1.slot_index(rq->pf_ptr[q2]);

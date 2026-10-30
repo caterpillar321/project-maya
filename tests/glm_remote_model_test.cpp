@@ -277,17 +277,25 @@ int main(int argc, char** argv) {
 
     // Native MTP must match the SAME distributed trunk's ordinary greedy generation, including state after rejection.
     model.reset();
-    require(model.forward(prefix, logits, err), err);
     if (refresh) {
+        // Snapshots save sequence state for an extending prompt, not cached logits / last_tok_. Save before
+        // the final prefix token and replay it on both branches so MTP cannot sample the old continuation.
+        require(model.forward(std::vector<int32_t>(prefix.begin(), prefix.end()-1), logits, err), err);
         require(model.refresh_stage_helper(err), err);
         require(model.snapshot_save(), "save an active prefix after helper refresh");
-    }
+        require(model.forward({prefix.back()}, logits, err), err);
+    } else require(model.forward(prefix, logits, err), err);
+    const auto prefix_head = logits;
     std::vector<int> plain;
     for (int i = 0; i < 24; ++i) {
         const int t = pick(logits.data(), V); plain.push_back(t);
         require(model.forward({t}, logits, err), err);
     }
-    if (refresh) require(model.snapshot_restore(), "restore the same prefix and helper epoch for MTP");
+    if (refresh) {
+        require(model.snapshot_restore(), "restore the same prefix and helper epoch for MTP");
+        require(model.forward({prefix.back()}, logits, err), err);
+        compare(prefix_head.data(), logits.data(), V, "restored prefix head before MTP");
+    }
     else {
         model.reset();
         require(model.forward(prefix, logits, err), err);

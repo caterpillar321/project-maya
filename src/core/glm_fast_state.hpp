@@ -766,6 +766,10 @@ struct Glm5Model::FastState {
     bool stage_ram_canonical = false;
     std::atomic<uint64_t> fixed_cpu_batches{0}, fixed_cpu_entries{0}, fixed_cpu_unique{0};
     std::atomic<uint64_t> window_prefetch_issued{0}, window_prefetch_used{0};
+    std::array<std::atomic<uint64_t>, 8> window_prefetch_rank_issued{}, window_prefetch_rank_used{};
+    // Source-layer limits; zero means the configured default. A bounded opt-in policy, never an expert skip.
+    std::array<std::atomic<int>, 128> window_prefetch_rank_cap{};
+    std::atomic<uint64_t> window_prefetch_rank_updates{0};
     std::array<uint64_t, 17> stage_timing_n{};
     std::array<double, 17> stage_timing_front_ms{}, stage_timing_tail_ms{};
     std::array<uint64_t, 2> stream_timing_n{};

@@ -1,0 +1,211 @@
+{
+  "date": "2026-10-30",
+  "selected": "Existing resident-overlap a1d313b, static rank4; DMA and adaptive prefetch off",
+  "method": "Same captured 15 requests / 8696 output tokens; all output token IDs and prefix reuse equal, same tool gaps; no additional CPU thread. Each run starts fresh.",
+  "runs": [
+    {
+      "main_cpu_seconds": 423.40000000000003,
+      "main_cpu_percent": 164.08071430468732,
+      "mode": "rank4",
+      "run": "/home/caterpillar/fn/remote-stage-rank-rank4-20261030a",
+      "wall_with_tool_gaps": 258.0437328019998,
+      "request_wall": 244.2916794099965,
+      "prompt_ms": 44048.0,
+      "decode_ms": 195726.4,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.50576126954922,
+      "aggregate_speed": 44.42792759146988,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6214.610000000001,
+      "prefetch_by_rank": [
+        {
+          "rank": 1,
+          "issued": 29941,
+          "selected_next": 26186
+        },
+        {
+          "rank": 2,
+          "issued": 39461,
+          "selected_next": 29899
+        },
+        {
+          "rank": 3,
+          "issued": 44729,
+          "selected_next": 28878
+        },
+        {
+          "rank": 4,
+          "issued": 47068,
+          "selected_next": 25693
+        },
+        {
+          "rank": 5,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 6,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 7,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 8,
+          "issued": 0,
+          "selected_next": 0
+        }
+      ],
+      "ram_payload_bytes": 4198883917824,
+      "prefetch_payload_bytes": 2148573904896
+    },
+    {
+      "main_cpu_seconds": 426.0,
+      "main_cpu_percent": 164.50884190599317,
+      "mode": "rank2",
+      "run": "/home/caterpillar/fn/remote-stage-rank-rank2-20261030a",
+      "wall_with_tool_gaps": 258.9526465960007,
+      "request_wall": 245.20412960099566,
+      "prompt_ms": 44042.7,
+      "decode_ms": 196648.9,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.28448712051517,
+      "aggregate_speed": 44.22308042030234,
+      "ram_fetch": 41.98040593376265,
+      "mtp_hit": 0.8963766443572583,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6218.973,
+      "prefetch_by_rank": [
+        {
+          "rank": 1,
+          "issued": 30846,
+          "selected_next": 26566
+        },
+        {
+          "rank": 2,
+          "issued": 41214,
+          "selected_next": 30573
+        },
+        {
+          "rank": 3,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 4,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 5,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 6,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 7,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 8,
+          "issued": 0,
+          "selected_next": 0
+        }
+      ],
+      "ram_payload_bytes": 4886380412928,
+      "prefetch_payload_bytes": 959972376576
+    },
+    {
+      "main_cpu_seconds": 422.69000000000005,
+      "main_cpu_percent": 164.25642772207854,
+      "mode": "adaptive",
+      "run": "/home/caterpillar/fn/remote-stage-rank-adaptive-20261030a",
+      "wall_with_tool_gaps": 257.3354393869995,
+      "request_wall": 243.58222605100127,
+      "prompt_ms": 44067.9,
+      "decode_ms": 195000.7,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.659889604415824,
+      "aggregate_speed": 44.59739898081404,
+      "ram_fetch": 39.222522999080034,
+      "mtp_hit": 0.8953381029309947,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6218.09,
+      "prefetch_by_rank": [
+        {
+          "rank": 1,
+          "issued": 30590,
+          "selected_next": 26280
+        },
+        {
+          "rank": 2,
+          "issued": 32976,
+          "selected_next": 26085
+        },
+        {
+          "rank": 3,
+          "issued": 24159,
+          "selected_next": 17881
+        },
+        {
+          "rank": 4,
+          "issued": 12979,
+          "selected_next": 9217
+        },
+        {
+          "rank": 5,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 6,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 7,
+          "issued": 0,
+          "selected_next": 0
+        },
+        {
+          "rank": 8,
+          "issued": 0,
+          "selected_next": 0
+        }
+      ],
+      "ram_payload_bytes": 4566062727168,
+      "prefetch_payload_bytes": 1342094966784
+    }
+  ],
+  "validation": {
+    "rank2_gate": "/home/caterpillar/fn/remote-stage-rank-test-20261030b",
+    "adaptive_gate": "/home/caterpillar/fn/remote-stage-rank-test-20261030c",
+    "comparisons_per_gate": 140,
+    "max_abs": 0,
+    "relative_l2": 0,
+    "all_picks_equal": true,
+    "checks_per_gate": 21683887,
+    "cpu_ctest_passed": 4
+  },
+  "limitations": [
+    "Route payload is requested expert bytes, not physical PCIe counters.",
+    "Issued-rank statistics omit candidates already resident in VRAM or owned by helpers.",
+    "Window counters may include short prefill tails.",
+    "A candidate not selected immediately may help a later token through cache residency.",
+    "Adaptive result is a small single-pair gain; insufficient evidence to replace the current default."
+  ],
+  "test_fix": "Replay the last prefix token after snapshot restore; snapshots restore recurrent/DSA state and position, not cached logits or last_tok. Added direct full-vocabulary prefix-head comparison."
+}

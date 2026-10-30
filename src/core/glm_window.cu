@@ -625,9 +625,29 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                           W.T == T && !W.per_token && !W.piped && n_parts_ == 1 &&
                           F->rows_scr && F->win_scratch_rows >= T && F->rows_group >= T &&
                           glmfast::off_by_default_on_amd("STRATA_GLM_WIN_BATCH");
-    const bool predict = window_pf && il + 1 < l1_ && F->L[(size_t) il + 1].moe;
-    // Low-ranked predictions waste the same link they are intended to hide. Keep the top four only.
-    static const int prediction_rank = 4;
+    // Only restrict speculative copies, never the eight experts selected by the actual router.
+    static const int prediction_rank = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH_RANK");
+        if (!v || !*v) return 4;
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (*end || n < 0 || n > 8) {
+            std::fprintf(stderr, "glm window prefetch: invalid rank limit; using 4 (expected 0..8)\n");
+            return 4;
+        }
+        std::fprintf(stderr, "glm window prefetch: prediction rank limit %ld\n", n);
+        return (int) n;
+    }();
+    static const bool rank_adapt = [] {
+        const char* v = getenv("STRATA_GLM_WIN_PREFETCH_ADAPT");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    int layer_prediction_rank = prediction_rank;
+    if (rank_adapt && T == 1 && il >= 0 && il < (int) F->window_prefetch_rank_cap.size()) {
+        const int cap = F->window_prefetch_rank_cap[(size_t) il].load(std::memory_order_relaxed);
+        if (cap > 0) layer_prediction_rank = std::min(layer_prediction_rank, cap);
+    }
+    const bool predict = window_pf && layer_prediction_rank > 0 && il + 1 < l1_ && F->L[(size_t) il + 1].moe;
     if (part != 2) {
         gf::MvJob j[4];
         const void* xq0 = (const uint8_t*) W.xq + (size_t) t0 * W.xq_s;
@@ -843,7 +863,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                           predict ? W.pred_rlog + (size_t) t * g.n_expert : nullptr,
                           predict ? F->L[(size_t) il + 1].router_bias : nullptr,
                           predict ? (T == 1 || (T == 2 && t == 0) ? 2 : 1) : 0,
-                          nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, prediction_rank, 0, t,
+                          nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, layer_prediction_rank, 0, t,
                           private_scratch ? nullptr : scr, t0 + T);
             ++F->expected;
             trace("moe_route", t);
