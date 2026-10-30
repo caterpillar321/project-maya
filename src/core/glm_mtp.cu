@@ -622,12 +622,30 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
         err = "glm mtp: the MTP decode is not set up on this model";
         return false;
     }
-    if (const char* pipeline = getenv("STRATA_GLM_REMOTE_PIPELINE"); pipeline && std::strcmp(pipeline, "1") == 0)
-        return decode_remote_stream(sp, max_new, emit, produced, err);
+    const char* block_env = getenv("STRATA_GLM_REMOTE_BLOCK_PIPELINE");
+    const bool block = remote_front_ && block_env && std::strcmp(block_env, "1") == 0;
+    const char* cached_env = getenv("STRATA_GLM_REMOTE_BLOCK_CACHED_ONLY");
+    const bool cached_only = block && cached_env && std::strcmp(cached_env, "1") == 0;
+    const char* adapt_env = getenv("STRATA_GLM_REMOTE_BLOCK_ADAPTIVE");
+    const bool block_adaptive = cached_only && adapt_env && std::strcmp(adapt_env, "1") == 0;
+    int previous_forecasts = 0, misses = 0, quiet = 0;
+    bool dual_forecast = true;
+    uint64_t single_forecasts = 0, double_forecasts = 0;
+    if (!block)
+        if (const char* pipeline = getenv("STRATA_GLM_REMOTE_PIPELINE"); pipeline && std::strcmp(pipeline, "1") == 0)
+            return decode_remote_stream(sp, max_new, emit, produced, err);
+    if (block && (stage_window_pending_ || stage_failed_ || remote_front_->streaming())) {
+        err = "block pipeline requires an idle coordinator"; return false;
+    }
+    stage_block_active_ = block;
+    stage_block_front_inflight_ = false;
+    struct BlockScope { bool& active; bool& inflight; ~BlockScope() { active = false; inflight = false; } }
+        block_scope{stage_block_active_, stage_block_front_inflight_};
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     const int64_t E = g.n_embd;
-    const int n_cap = std::min(mtp_draft_cap(), std::min(kWinMax - 1, 8));
+    const int n_cap = block ? 1 : std::min(mtp_draft_cap(), std::min(kWinMax - 1, 8));
+    if (block) F->block_windows = F->block_rows = F->block_reused = 0;
     static const bool trace = getenv("STRATA_GLM_MTP_TRACE") != nullptr;
     // the first token: the prompt's last forward left its logits (and greedy argmax)
     int y = -1;
@@ -676,7 +694,8 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
     };
     for (;;) {
         const auto t0 = std::chrono::steady_clock::now();
-        int n = mtp_choose(n_cap);
+        stage_block_guesses_ = 0;
+        int n = block ? 1 : mtp_choose(n_cap);
         n = (int) std::min<int64_t>(n, max_new - produced - 1);
         n = (int) std::min<int64_t>(n, max_ctx_ - 1 - p0);
         if (mtp_hx_pos_ != p0 - 1) n = 0;   // (no trunk state to draft from: a plain token)
@@ -723,6 +742,47 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
             ++n_drafting;
             mtp_hx_pos_ = -1;   // (head_x holds the block's hidden state now)
             if (!ok) break;
+        }
+        const bool one_draft = block && nd > 0;
+        if (block_adaptive && one_draft) {
+            if (previous_forecasts == 2) {
+                if (remote_front_->block_reusable_prefix(win.data(), 2) == 2) misses = 0;
+                else if (++misses >= 2) { dual_forecast = false; quiet = 32; misses = 0; }
+            } else if (!dual_forecast && quiet > 0 && --quiet == 0) dual_forecast = true;
+        }
+        if (cached_only && one_draft && remote_front_->block_reusable_prefix(win.data(), 2) != 2)
+            nd = 0; // preserve this fresh draft for front lookahead, but verify only the actual token now
+        if (block_adaptive && !dual_forecast) nd = 0;
+        if (block) {
+            // Send the actual verification inputs before doing the two lookahead drafts. The worker can
+            // resolve/recompute the current front while this GPU drafts, with no extra CPU thread.
+            if (!remote_front_->block_begin(p0, win.data(), 1 + nd, nullptr, 0, err)) { ok = false; break; }
+            stage_block_front_inflight_ = true;
+        }
+        if (one_draft) {
+            // Forecast the following block before this verification starts. Its front executes while the
+            // current tail verifies T2. These guesses never determine an emitted token.
+            const int ahead = (int) std::min<int64_t>(block_adaptive && !dual_forecast ? 1 : 2,
+                                                       std::min<int64_t>(max_new - produced - (1 + nd),
+                                                                         max_ctx_ - p0 - (1 + nd)));
+            int32_t guess = win[1];
+            const bool sub = F->mtp_dv > 0 && mtp_out_ < kOutMax;
+            if (nd == 0 && ahead > 0) stage_block_next_[stage_block_guesses_++] = guess;
+            for (int j = stage_block_guesses_; j < ahead; ++j) {
+                const int step = nd + j;
+                if (!fast_mtp(p0 - 1 + step, guess, err, step, sub) ||
+                    !glmfast::wait_event(F->ev_mtp, "block lookahead draft", err) || !F->route_ok(err)) {
+                    ok = false; break;
+                }
+                guess = F->mtp_tok_h[step];
+                stage_block_next_[stage_block_guesses_++] = guess;
+            }
+            if (!ok) break;
+        }
+        if (block) {
+            previous_forecasts = stage_block_guesses_;
+            single_forecasts += stage_block_guesses_ == 1;
+            double_forecasts += stage_block_guesses_ == 2;
         }
         const int T = 1 + nd;
         int keep = 1, acc = 0;
@@ -829,6 +889,15 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
             if (ok) err = drain_err;
             ok = false;
         }
+    }
+    if (block) {
+        if (ok) ok = stage_block_finish(err);
+        if (!ok) { stage_failed_ = true; remote_front_->close(); }
+        std::fprintf(stderr, "glm block pipeline: %llu windows, %llu rows, %llu cached front rows reused; cached_only=%d\n",
+                     (unsigned long long) F->block_windows, (unsigned long long) F->block_rows,
+                     (unsigned long long) F->block_reused, cached_only);
+        if (block_adaptive) std::fprintf(stderr, "glm block adaptive: %llu single forecasts, %llu double forecasts\n",
+                                         (unsigned long long) single_forecasts, (unsigned long long) double_forecasts);
     }
     win_prof_report();   // (STRATA_GLM_WIN_PROF: the verify windows' phases)
     if (n_ph > 0)

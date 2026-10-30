@@ -39,10 +39,10 @@ bool same_info(const Info& a, const Info& b) {
            a.top_k == b.top_k && a.nextn == b.nextn && a.kv_bits == b.kv_bits && a.kv_resident == b.kv_resident;
 }
 bool valid_header(const Header& h, std::string& err) {
-    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > PrefillStream ||
+    if (h.magic_value != magic || h.version_value != version || h.op < Hello || h.op > BlockForecast ||
         (h.flags & ~(reply | failure | cache_hit | more)) ||
         ((h.flags & (failure | cache_hit | more)) && !(h.flags & reply)) ||
-        ((h.flags & cache_hit) && (h.op != StreamStep || (h.flags & failure))) ||
+        ((h.flags & cache_hit) && ((h.op != StreamStep && h.op != BlockStep) || (h.flags & failure))) ||
         ((h.flags & more) && (h.op != PrefillStream || (h.flags & failure))) ||
         h.bytes > ((h.op == Prefill || h.op == PrefillStream || h.op == SlotRead || h.op == SlotWrite) ? max_payload : 16u * 4u * 4096u * sizeof(float)) ||
         h.rows > ((h.op == Prefill || h.op == PrefillStream) ? max_prefill_rows : 16u) || h.position < 0) {
@@ -145,6 +145,8 @@ GlmRemoteStage::~GlmRemoteStage() { close(); }
 void GlmRemoteStage::close() {
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1; pending_rows_ = 0; streaming_ = false; stream_guess_ = -1;
+    block_streaming_ = false; block_rows_ = block_keep_ = block_guesses_ = 0;
+    block_flight_ = false;
 }
 bool GlmRemoteStage::open(const std::string& endpoint, const st::Info& expected, std::string& err) {
     const int fd = st::accept_one(endpoint, err);
@@ -183,7 +185,7 @@ bool GlmRemoteStage::exchange(st::Header h, const void* p, size_t n, st::Header&
     return true;
 }
 bool GlmRemoteStage::verify(int64_t p0, const int32_t* tokens, int rows, std::vector<float>& residual, std::string& err) {
-    if (pending() || streaming_ || rows < 1 || rows > 16 || tokens == nullptr || p0 != position_ || p0 > info_.context - rows) {
+    if (pending() || streaming() || rows < 1 || rows > 16 || tokens == nullptr || p0 != position_ || p0 > info_.context - rows) {
         err = "stage verify position/window mismatch"; return false;
     }
     for (int i = 0; i < rows; ++i) if (tokens[i] < 0 || (uint32_t) tokens[i] >= info_.vocab) {
@@ -209,7 +211,7 @@ bool GlmRemoteStage::verify(int64_t p0, const int32_t* tokens, int rows, std::ve
 }
 bool GlmRemoteStage::prefill(int64_t position, const std::vector<int32_t>& tokens, int32_t next_token,
                               std::vector<float>& residual, std::string& err) {
-    if (pending() || streaming_ || position != position_ || tokens.empty() ||
+    if (pending() || streaming() || position != position_ || tokens.empty() ||
         tokens.size() > st::max_prefill_rows || position > info_.context - (int64_t) tokens.size() ||
         next_token < -1 || (next_token >= 0 && (uint32_t) next_token >= info_.vocab)) {
         err = "invalid remote prefill range/lifecycle"; return false;
@@ -236,7 +238,7 @@ bool GlmRemoteStage::prefill(int64_t position, const std::vector<int32_t>& token
 }
 bool GlmRemoteStage::prefill_stream(int64_t position, const std::vector<int32_t>& tokens, int32_t next_token, int chunk,
     const std::function<bool(size_t,const std::vector<float>&,std::string&)>& consume, std::string& err) {
-    if (!ready() || pending() || streaming_ || position!=position_ || tokens.empty() ||
+    if (!ready() || pending() || streaming() || position!=position_ || tokens.empty() ||
         tokens.size()>st::max_prefill_rows || position>info_.context-(int64_t)tokens.size() ||
         chunk<1 || chunk>(int)st::max_prefill_rows || next_token < -1 ||
         (next_token>=0 && (uint32_t)next_token>=info_.vocab)) {err="invalid streamed prefill request";return false;}
@@ -294,21 +296,23 @@ bool GlmRemoteStage::commit(int keep, std::string& err) {
     position_ = pending_position_ + keep; pending_rows_ = 0; return true;
 }
 bool GlmRemoteStage::reset(std::string& err) {
+    if (block_flight_) { err = "finish the block response before reset"; return false; }
     if (!control(st::Reset, 0, 0, err)) return false;
-    position_ = 0; pending_rows_ = 0; snapshot_position_ = -1; streaming_ = false; stream_guess_ = -1; return true;
+    position_ = 0; pending_rows_ = 0; snapshot_position_ = -1; streaming_ = false; stream_guess_ = -1;
+    block_streaming_ = false; block_rows_ = block_keep_ = block_guesses_ = 0; return true;
 }
 bool GlmRemoteStage::save(int64_t position, std::string& err) {
-    if (pending() || streaming_ || position != position_) { err = "invalid stage snapshot position"; return false; }
+    if (pending() || streaming() || position != position_) { err = "invalid stage snapshot position"; return false; }
     if (!control(st::Save, position, 0, err)) return false;
     snapshot_position_ = position; return true;
 }
 bool GlmRemoteStage::restore(int64_t position, std::string& err) {
-    if (pending() || streaming_ || position < 0 || position != snapshot_position_) { err = "stage snapshot unavailable"; return false; }
+    if (pending() || streaming() || position < 0 || position != snapshot_position_) { err = "stage snapshot unavailable"; return false; }
     if (!control(st::Restore, position, 0, err)) return false;
     position_ = position; return true;
 }
 bool GlmRemoteStage::checkpoint(uint32_t op, int slot, int64_t position, std::string& err) {
-    if (pending() || streaming_ || slot < 0 || slot >= 256 || position < 0 || position > info_.context ||
+    if (pending() || streaming() || slot < 0 || slot >= 256 || position < 0 || position > info_.context ||
         (op != st::CheckSave && op != st::CheckSaveSnapshot && op != st::CheckRestore) ||
         (op == st::CheckSave && position != position_) ||
         (op == st::CheckSaveSnapshot && position != snapshot_position_)) {
@@ -325,7 +329,7 @@ bool GlmRemoteStage::checkpoint(uint32_t op, int slot, int64_t position, std::st
     return true;
 }
 bool GlmRemoteStage::slot_read(int64_t position, std::vector<uint8_t>& bytes, std::string& err) {
-    if (pending() || streaming_ || position < 1 || position != snapshot_position_) {
+    if (pending() || streaming() || position < 1 || position != snapshot_position_) {
         err = "invalid remote slot snapshot"; return false;
     }
     st::Header h; h.op = st::SlotRead; h.position = position;
@@ -337,7 +341,7 @@ bool GlmRemoteStage::slot_read(int64_t position, std::vector<uint8_t>& bytes, st
     return true;
 }
 bool GlmRemoteStage::slot_write(int64_t position, const std::vector<uint8_t>& bytes, std::string& err) {
-    if (pending() || streaming_ || position < 1 || position > info_.context || bytes.empty() || bytes.size() > st::max_payload) {
+    if (pending() || streaming() || position < 1 || position > info_.context || bytes.empty() || bytes.size() > st::max_payload) {
         err = "invalid remote slot import"; return false;
     }
     st::Header h; h.op = st::SlotWrite; h.position = position;
@@ -352,7 +356,7 @@ bool GlmRemoteStage::slot_write(int64_t position, const std::vector<uint8_t>& by
 bool GlmRemoteStage::stream_step(int64_t position, int32_t token, int32_t next_guess,
                                  std::vector<float>& residual, bool& hit, std::string& err) {
     hit = false;
-    if (pending() || position != position_ || position >= info_.context || token < 0 ||
+    if (pending() || block_streaming_ || position != position_ || position >= info_.context || token < 0 ||
         (uint32_t) token >= info_.vocab || next_guess < -1 ||
         (next_guess >= 0 && ((uint32_t) next_guess >= info_.vocab || position + 1 >= info_.context))) {
         err = "stage stream token/position mismatch"; return false;
@@ -371,7 +375,105 @@ bool GlmRemoteStage::stream_step(int64_t position, int32_t token, int32_t next_g
     hit = expected_hit; position_ = position + 1; streaming_ = true; stream_guess_ = next_guess;
     return true;
 }
+bool GlmRemoteStage::block_step(int64_t position, const int32_t* tokens, int rows, const int32_t* next, int guesses,
+                              std::vector<float>& residual, int& reused, std::string& err) {
+    return block_begin(position, tokens, rows, next, guesses, err) && block_finish(residual, reused, err);
+}
+int GlmRemoteStage::block_reusable_prefix(const int32_t* tokens, int rows) const {
+    if (!tokens || rows < 1 || rows > 2 || !block_streaming_ || block_flight_ || block_keep_ != block_rows_ || block_keep_ < 1)
+        return 0;
+    int matched = 0;
+    while (matched < rows && matched < block_guesses_ && tokens[matched] == block_next_[matched]) ++matched;
+    return matched;
+}
+bool GlmRemoteStage::block_begin(int64_t position, const int32_t* tokens, int rows, const int32_t* next, int guesses,
+                               std::string& err) {
+    if (pending() || streaming_ || position != position_ || rows < 1 || rows > 2 || !tokens ||
+        guesses < 0 || guesses > 2 || (guesses && !next) || position > info_.context - rows - guesses ||
+        (block_streaming_ && (block_keep_ < 1 || block_keep_ > block_rows_))) {
+        err = "invalid block stream range/lifecycle"; return false;
+    }
+    st::BlockInput input;
+    input.keep = block_streaming_ ? block_keep_ : 0; input.guesses = guesses;
+    for (int i = 0; i < rows; ++i) {
+        if (tokens[i] < 0 || (uint32_t) tokens[i] >= info_.vocab) { err = "invalid block token"; return false; }
+        input.tokens[i] = tokens[i];
+    }
+    for (int i = 0; i < guesses; ++i) {
+        if (next[i] < 0 || (uint32_t) next[i] >= info_.vocab) { err = "invalid block guess"; return false; }
+        input.next[i] = next[i];
+    }
+    const int expected = block_reusable_prefix(tokens, rows);
+    st::Header h; h.op = st::BlockStep; h.position = position; h.rows = rows; h.window = ++window_;
+    h.session = session_; h.sequence = ++sequence_;
+    if (!st::send_packet(fd_, h, &input, sizeof(input), err)) { close(); return false; }
+    block_request_ = h; block_input_ = input; block_expected_ = expected; block_flight_ = true;
+    return true;
+}
+bool GlmRemoteStage::block_finish(std::vector<float>& residual, int& reused, std::string& err) {
+    reused = 0;
+    if (!block_flight_) { err = "no block response pending"; return false; }
+    const auto h = block_request_;
+    const auto input = block_input_;
+    const int64_t position = h.position; const int rows = h.rows, guesses = input.guesses, expected = block_expected_;
+    st::Header a; std::vector<uint8_t> data;
+    if (!st::receive_packet(fd_, a, data, err)) { close(); return false; }
+    if (a.session != session_ || a.sequence != h.sequence || a.op != h.op || a.window != h.window || !(a.flags & st::reply)) {
+        err = "block response identity mismatch"; close(); return false;
+    }
+    if (a.flags & st::failure) { err = "stage worker: " + std::string(data.begin(), data.end()); close(); return false; }
+    const size_t floats = (size_t) rows * info_.hc * info_.embd;
+    st::BlockReply meta;
+    if (data.size() >= sizeof(meta)) std::memcpy(&meta, data.data(), sizeof(meta));
+    if (a.position != position + rows || a.rows != (uint32_t) rows ||
+        data.size() != sizeof(meta) + floats * sizeof(float) || meta.reserved || meta.reused != (uint32_t) expected ||
+        bool(a.flags & st::cache_hit) != (expected == rows)) {
+        err = "block response shape/position/reuse mismatch"; close(); return false;
+    }
+    residual.resize(floats); std::memcpy(residual.data(), data.data() + sizeof(meta), floats * sizeof(float));
+    reused = expected; block_streaming_ = true; block_position_ = position; block_rows_ = rows; block_keep_ = 0;
+    block_guesses_ = guesses;
+    for (int i = 0; i < 2; ++i) block_next_[i] = input.next[i];
+    position_ = position + rows;
+    block_flight_ = false;
+    return true;
+}
+bool GlmRemoteStage::block_forecast(const int32_t* next, int guesses, std::string& err) {
+    if (!block_streaming_ || block_flight_ || block_keep_ != 0 || block_guesses_ != 0 || guesses < 1 || guesses > 2 ||
+        !next || position_ > info_.context - guesses) { err = "invalid block forecast lifecycle"; return false; }
+    for (int i = 0; i < guesses; ++i)
+        if (next[i] < 0 || (uint32_t) next[i] >= info_.vocab) { err = "invalid block forecast token"; return false; }
+    st::Header h; h.op = st::BlockForecast; h.position = position_; h.rows = guesses; h.window = window_;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, next, guesses*sizeof(int32_t), a, data, err)) return false;
+    if (a.position != position_ || a.rows != h.rows || !data.empty()) {
+        err = "block forecast acknowledgment mismatch"; close(); return false;
+    }
+    block_guesses_ = guesses;
+    for (int i = 0; i < guesses; ++i) block_next_[i] = next[i];
+    return true;
+}
+bool GlmRemoteStage::block_commit(int keep, std::string& err) {
+    if (!block_streaming_ || block_keep_ != 0 || keep < 1 || keep > block_rows_) {
+        err = "invalid block stream commit"; return false;
+    }
+    block_keep_ = keep; position_ = block_position_ + keep; return true;
+}
+bool GlmRemoteStage::block_end(std::string& err) {
+    if (block_flight_) { err = "finish the block response before end"; return false; }
+    if (!block_streaming_) return ready();
+    if (block_keep_ < 1 || block_keep_ > block_rows_) { err = "uncommitted block stream end"; return false; }
+    st::Header h; h.op = st::BlockEnd; h.position = position_; h.rows = block_keep_;
+    st::Header a; std::vector<uint8_t> data;
+    if (!exchange(h, nullptr, 0, a, data, err)) return false;
+    if (a.position != position_ || a.rows != h.rows || !data.empty()) {
+        err = "block end acknowledgment mismatch"; close(); return false;
+    }
+    block_streaming_ = false; block_rows_ = block_keep_ = block_guesses_ = 0;
+    return true;
+}
 bool GlmRemoteStage::stream_end(std::string& err) {
+    if (block_streaming_) { err = "block stream needs block_end"; return false; }
     if (!streaming_) return ready();
     if (!control(st::StreamEnd, position_, 0, err)) return false;
     streaming_ = false; stream_guess_ = -1; return true;

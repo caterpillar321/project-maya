@@ -876,7 +876,12 @@ public:
     bool stage_commit(int keep, std::string& err);
     bool stage_prefill(const std::vector<int32_t>& tokens, int32_t next_token, const float* input,
                        size_t input_floats, std::vector<float>& output, std::string& err);
-    bool stage_discard(std::string& err); // front-only: discard one uncommitted speculative token
+    bool stage_discard(std::string& err); // front-only: discard a tentative window (up to three rows)
+    bool stage_block_checkpoint(int bank, bool save, std::string& err);
+    bool stage_block_commit_full(std::string& err);
+    bool stage_block_window(const int32_t* tokens, int rows, const int32_t* next, int guesses,
+                            StageWindowResult& result, std::string& err, bool capture_logits = false);
+    bool stage_block_finish(std::string& err);
     bool stage_window_pending() const { return stage_window_pending_; }
     bool stage_info(int cut, stageproto::Info& info, std::string& err) const;
     bool window_logits(std::vector<float>& logits, std::string& err) const; // diagnostics, before commit
@@ -903,6 +908,10 @@ private:
         bool capture_logits = false;
     };
     bool stage_windows_enabled_ = false, stage_window_pending_ = false, stage_failed_ = false;
+    bool stage_block_active_ = false;
+    bool stage_block_front_inflight_ = false;
+    int stage_block_guesses_ = 0;
+    int32_t stage_block_next_[2] = {-1,-1};
     bool window_impl(const int32_t* tokens, int T, int32_t* out, std::string& err,
                      const strata::kernels::SamplerParams* sp, StageWindowIO* stage);
 public:

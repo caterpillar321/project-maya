@@ -4754,6 +4754,10 @@ void Glm5Model::fast_destroy() {
                      (unsigned long long) F->kda_graphs.replays,
                      (unsigned long long) F->kda_graphs.invalidations);
     F->kda_graphs.clear();   // before the graph's buffers and streams are freed
+    for (auto& checkpoint : F->block_checkpoints) {
+        if (checkpoint.state) cudaFree(checkpoint.state);
+        if (checkpoint.pool) cudaFree(checkpoint.pool);
+    }
     for (auto& R : F->rc)
         if (R.base && R.registered) numa_pinned_free(R.base, (size_t) R.n * R.stride);
         else if (R.base) cudaFreeHost(R.base);

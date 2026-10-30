@@ -331,7 +331,39 @@ std::vector<float> grouped(Fixture& f, int gu_type, size_t down_off) {
     w.grp_ptr = f.alloc<unsigned long long>(T * K); w.grp_start = f.alloc<int>(T * K + 1);
     w.grp_ent = f.alloc<int>(T * K); w.n_groups = f.alloc<int>(1);
     expect(gf::moe_win_experts(gu_type, 23, w, 0), "grouped expert types supported");
-    CK(cudaStreamSynchronize(0)); return download(w.out, T * E);
+    CK(cudaStreamSynchronize(0));
+    const auto reference = download(w.out, T * E);
+    if (T == 2) {
+        auto* flags = f.alloc<unsigned long long>(T * K);
+        const auto plans = download(f.plans, T * K);
+        const auto original_flags = download(f.fetch, T * K);
+        w.fetch_src = flags;
+        for (int pattern = 0; pattern < 4; ++pattern) {
+            std::vector<unsigned long long> source(T * K, 0);
+            for (int e = 0; e < T * K; ++e)
+                source[e] = pattern == 1 || (pattern == 2 && e >= K) || (pattern == 3 && original_flags[e]) ? 1 : 0;
+            upload(flags, source);
+            std::vector<unsigned long long> pending;
+            std::vector<std::vector<uint8_t>> saved;
+            for (int e = 0; e < T * K; ++e) if (source[e] && plans[e] &&
+                std::find(pending.begin(), pending.end(), plans[e]) == pending.end()) {
+                pending.push_back(plans[e]); saved.push_back(download((uint8_t*) plans[e], f.blob));
+                CK(cudaMemset((void*) plans[e], 0, f.blob)); // the copy has NOT arrived when phase one executes
+            }
+            CK(cudaMemset(w.part, 0xcd, T * K * E * sizeof(float)));
+            w.fetch_phase = 1;
+            expect(gf::moe_win_experts(gu_type, 23, w, 0), "T2 resident phase supported");
+            CK(cudaStreamSynchronize(0));
+            for (size_t i = 0; i < pending.size(); ++i) upload((uint8_t*) pending[i], saved[i]);
+            w.fetch_phase = 2;
+            expect(gf::moe_win_experts(gu_type, 23, w, 0), "T2 fetched phase supported");
+            CK(cudaStreamSynchronize(0));
+            const auto result = download(w.out, T * E);
+            expect(std::memcmp(reference.data(), result.data(), result.size()*sizeof(float)) == 0,
+                   "T2 split preserves arithmetic and waits for every member of a shared group");
+        }
+    }
+    return reference;
 }
 void test_arithmetic(int T) {
     for (int up : {23, 12, 13}) {

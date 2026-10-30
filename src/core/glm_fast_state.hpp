@@ -774,6 +774,9 @@ struct Glm5Model::FastState {
     std::array<double, 17> stage_timing_front_ms{}, stage_timing_tail_ms{};
     std::array<uint64_t, 2> stream_timing_n{};
     std::array<double, 2> stream_timing_front_ms{}, stream_timing_tail_ms{};
+    struct BlockCheckpoint { float *state = nullptr, *pool = nullptr; int64_t position = -1; };
+    std::array<BlockCheckpoint, 2> block_checkpoints;
+    uint64_t block_windows = 0, block_rows = 0, block_reused = 0;
     std::vector<uint8_t> cpu_owned;
     bool aux_owns(int key) const {
         return helper.owns(key) || (!net_of.empty() && net_of[(size_t) key] != 0) ||

@@ -747,12 +747,18 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         const char* v = getenv("STRATA_GLM_WIN_RESIDENT_OVERLAP");
         return v && std::strcmp(v, "1") == 0;
     }();
-    const bool resident_overlap = resident_overlap_env && window_pf && private_scratch && T == 1 &&
+    static const bool resident_overlap_t2 = [] {
+        const char* v = getenv("STRATA_GLM_WIN_RESIDENT_OVERLAP_T2");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    const bool resident_overlap = resident_overlap_env && window_pf && private_scratch &&
+                                  (T == 1 || (T == 2 && resident_overlap_t2)) &&
                                   !Ly.exl3 && !F->all_resident;
-    static const bool demand_dma = [] {
+    static const bool demand_dma_env = [] {
         const char* v = getenv("STRATA_GLM_WIN_DEMAND_DMA");
         return v && std::strcmp(v, "1") == 0;
     }();
+    const bool demand_dma = demand_dma_env && T == 1;
     static const bool eager_modules = [] {
         const char* v = getenv("CUDA_MODULE_LOADING");
         return v && std::strcmp(v, "EAGER") == 0;
@@ -832,7 +838,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             // Each cpu_seq_w row reserves 16 uints; only [0] is its CPU-answer sequence. Keep [1] for the
             // route's disk sequence through both fetch phases. moe_wait must not be replaced by wait_fetch,
             // which clears wait_seq. Row 0's CPU sequence remains the ordinary md.cpu_seq as before.
-            if (route_ahead) mt.wait_seq = W.cpu_seq_w + 16 * t + 1;
+            if (route_ahead || (resident_overlap && T == 2)) mt.wait_seq = W.cpu_seq_w + 16 * t + 1;
             return mt;
         };
         const auto make_mw = [&](const float* shared) {
@@ -871,7 +877,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             if (!F->all_resident) {
                 gf::moe_wait(mt, E, s);
                 trace("moe_route_wait", t);
-                if (!resident_overlap) {
+                if (resident_overlap && T > 1) {
+                    // Disk staging is shared with the next route: finish disk-miss rows immediately.
+                    // Only RAM-only rows may be deferred to the overlap stream.
+                    gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::HasDiskMiss);
+                    trace("moe_fetch_disk_rows", t);
+                } else if (!resident_overlap) {
                     gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s,
                                   route_ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
                     trace(route_ahead ? "moe_fetch_disk_rows" : "moe_fetch_all", t);
@@ -883,7 +894,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                 trace("moe_route_ids", t);
             }
         }
-        if (route_ahead && !F->all_resident)
+        if (route_ahead && !F->all_resident && !resident_overlap)
             for (int t = t0; t < t0 + T; ++t) {
                 gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::NoDiskMiss);
                 trace("moe_fetch_ram_rows", t);
@@ -916,7 +927,9 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                                                           "resident overlap done event", err))) return false;
                 if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_ready, s), "resident overlap route ready", err) ||
                     !glmfast::cuda_ok(cudaStreamWaitEvent(F->ps, W.ev_fetch_ready, 0), "resident overlap copy wait", err)) return false;
-                gf::moe_fetch(tok_dev(t0), g.n_exp_used, Ly.blob, F->ps);
+                for (int t = t0; t < t0 + T; ++t)
+                    gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, F->ps,
+                                  T == 1 ? gf::MoeFetchPhase::All : gf::MoeFetchPhase::NoDiskMiss);
                 if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_done, F->ps), "resident overlap copies done", err)) return false;
             }
             gf::MoeWin ready = make_mw(nullptr);
@@ -1287,7 +1300,19 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         const bool measure = timing && fast_->tier_audit.active && T >= 1 && T <= kWinMax;
         const auto start = std::chrono::steady_clock::now();
         std::vector<float> residual;
-        if (!remote_front_->verify(pos_, tokens, T, residual, err)) { stage_failed_ = true; return false; }
+        int reused = 0;
+        const bool inflight = stage_block_front_inflight_;
+        bool got_front = stage_block_active_
+            ? (inflight ? remote_front_->block_finish(residual, reused, err)
+                        : remote_front_->block_step(pos_, tokens, T, stage_block_next_, stage_block_guesses_, residual, reused, err))
+            : remote_front_->verify(pos_, tokens, T, residual, err);
+        stage_block_front_inflight_ = false;
+        if (got_front && inflight && stage_block_guesses_ > 0)
+            got_front = remote_front_->block_forecast(stage_block_next_, stage_block_guesses_, err);
+        if (!got_front) { stage_failed_ = true; return false; }
+        if (stage_block_active_) {
+            ++fast_->block_windows; fast_->block_rows += T; fast_->block_reused += reused;
+        }
         const auto boundary = std::chrono::steady_clock::now();
         StageWindowResult result;
         if (!stage_window(tokens, T, residual.data(), residual.size(), result, err, sp)) {
@@ -1418,10 +1443,58 @@ bool Glm5Model::stage_stream_finish(std::string& err) {
     return true;
 }
 
+bool Glm5Model::stage_block_checkpoint(int bank, bool save, std::string& err) {
+    if (!fast_ || remote_front_ || split_next_ || l1_ >= g_.n_layers || bank < 0 || bank > 1 ||
+        stage_window_pending_ || stage_failed_) { err = "invalid front block checkpoint state"; return false; }
+    auto& checkpoint = fast_->block_checkpoints[(size_t) bank];
+    if (!save && checkpoint.position < 0) { err = "missing front block checkpoint"; return false; }
+    // Keep these two GPU-only rollback states separate from the ordinary conversation snapshot.
+    ckpt_join(); // an asynchronous conversation checkpoint may still read the ordinary snapshot pointers
+    std::swap(snap_, checkpoint.state); std::swap(snap_pool_, checkpoint.pool); std::swap(snap_pos_, checkpoint.position);
+    const bool ok = save ? snapshot_save() : snapshot_restore();
+    std::swap(snap_, checkpoint.state); std::swap(snap_pool_, checkpoint.pool); std::swap(snap_pos_, checkpoint.position);
+    if (!ok) { stage_failed_ = true; err = "front block checkpoint failed"; }
+    return ok;
+}
+
+bool Glm5Model::stage_block_commit_full(std::string& err) {
+    if (!fast_ || remote_front_ || l1_ >= g_.n_layers || !stage_window_pending_ || fast_->win.T != 2 || stage_failed_) {
+        err = "front block commit needs a pending T2"; return false;
+    }
+    // Save the full state, derive the first row with the existing cheap recurrent replay, and restore full.
+    // Bank 0 then rolls back a rejected second token without executing the first token's entire front again.
+    stage_window_pending_ = false;
+    const bool saved = stage_block_checkpoint(1, true, err);
+    stage_window_pending_ = true;
+    if (!saved || !stage_commit(1, err) || !stage_block_checkpoint(0, true, err) ||
+        !stage_block_checkpoint(1, false, err)) { stage_failed_ = true; return false; }
+    return true;
+}
+
+bool Glm5Model::stage_block_window(const int32_t* tokens, int rows, const int32_t* next, int guesses,
+                                  StageWindowResult& result, std::string& err, bool capture_logits) {
+    if (!remote_front_ || rows < 1 || rows > 2 || guesses < 0 || guesses > 2 || (guesses && !next)) {
+        err = "invalid explicit block window"; return false;
+    }
+    const bool old = stage_block_active_;
+    stage_block_active_ = true; stage_block_guesses_ = guesses;
+    for (int i = 0; i < guesses; ++i) stage_block_next_[i] = next[i];
+    result = {}; result.picks.resize(rows);
+    const bool ok = window(tokens, rows, result.picks.data(), err);
+    stage_block_active_ = old;
+    return ok && (!capture_logits || window_logits(result.logits, err));
+}
+
+bool Glm5Model::stage_block_finish(std::string& err) {
+    if (!remote_front_ || stage_window_pending_ || stage_failed_) { err = "invalid block finish state"; return false; }
+    if (!remote_front_->block_end(err)) { stage_failed_ = true; return false; }
+    return true;
+}
+
 bool Glm5Model::stage_discard(std::string& err) {
     if (!stage_windows_enabled_ || remote_front_ || l1_ >= g_.n_layers || !stage_window_pending_ ||
-        stage_failed_ || !fast_ || fast_->win.T != 1) {
-        err = "stage discard requires one pending front-only token"; return false;
+        stage_failed_ || !fast_ || fast_->win.T < 1 || fast_->win.T > 3) {
+        err = "stage discard requires a pending front-only window of 1..3 rows"; return false;
     }
     cudaSetDevice(dev_);
     const auto p0 = fast_->win.p0;
@@ -2513,7 +2586,9 @@ bool Glm5Model::window_commit(int n_keep, std::string& err, bool wait) {
     }
     const int T = fast_->win.T;
     const int64_t p0 = fast_->win.p0;
-    if (remote_front_ && remote_front_->streaming()) {
+    if (remote_front_ && remote_front_->block_streaming()) {
+        if (!remote_front_->block_commit(n_keep, err)) { stage_failed_ = true; return false; }
+    } else if (remote_front_ && remote_front_->streaming()) {
         if (T != 1 || n_keep != 1) { err = "remote stream only commits its actual token locally"; return false; }
     } else if (remote_front_ && !remote_front_->commit(n_keep, err)) { stage_failed_ = true; return false; }
     // a pipelined window's parts each enqueue their own restore and replay on their crew thread, at once (one after

@@ -81,6 +81,11 @@ int main(int argc, char** argv) {
     int64_t stream_position = 0;
     int32_t cached_token = -1;
     strata::core::Glm5Model::StageWindowResult cached;
+    bool block_active = false;
+    int block_rows = 0;
+    int64_t block_position = 0;
+    std::vector<int32_t> block_cached_tokens;
+    strata::core::Glm5Model::StageWindowResult block_cached;
     std::fprintf(stderr, "stage worker ready: session %llu, layers [0,%d), FP32 boundary\n",
                  (unsigned long long) session, cut);
     for (;;) {
@@ -97,10 +102,14 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "stage worker end: %s\n", err.c_str()); return clean ? 0 : 1;
         }
         bool ok = h.flags == 0 && h.session == session && h.sequence == sequence + 1;
+        if (block_active && h.op != st::BlockStep && h.op != st::BlockEnd && h.op != st::BlockForecast &&
+            h.op != st::Reset && h.op != st::Close)
+            ok = false;
         sequence = h.sequence;
         st::Header response = h; response.flags = st::reply;
         strata::core::Glm5Model::StageWindowResult result;
         int32_t next_prefetch = -1;
+        std::vector<int32_t> block_next;
         std::vector<uint8_t> slot_bytes;
         if (ok && h.op == st::PrefillStream) {
             ok=!streaming && !model.stage_window_pending() && !active_window && h.position==model.position() &&
@@ -150,6 +159,8 @@ int main(int argc, char** argv) {
             if (ok) {
                 model.reset(); active_window = 0; saved_position = -1;
                 streaming = false; stream_position = 0; cached_token = -1; cached = {};
+                block_active = false; block_rows = 0;
+                block_cached_tokens.clear(); block_cached = {};
             }
         } else if (ok && h.op == st::Save) {
             ok = !streaming && data.empty() && !h.rows && !h.window && !model.stage_window_pending() &&
@@ -184,6 +195,80 @@ int main(int argc, char** argv) {
                 const int32_t next = tokens.back(); tokens.pop_back();
                 ok = model.stage_prefill(tokens, next, nullptr, 0, result.residual, err);
                 if (ok) last_window = h.window;
+            }
+        } else if (ok && h.op == st::BlockStep) {
+            st::BlockInput input;
+            ok = !streaming && !active_window && h.rows >= 1 && h.rows <= 2 &&
+                 h.window == last_window + 1 && data.size() == sizeof(input);
+            if (ok) std::memcpy(&input, data.data(), sizeof(input));
+            ok = ok && input.guesses >= 0 && input.guesses <= 2 &&
+                 h.position <= info.context - h.rows - input.guesses;
+            if (ok) for (unsigned i = 0; i < h.rows; ++i)
+                ok = ok && input.tokens[i] >= 0 && (uint32_t) input.tokens[i] < info.vocab;
+            if (ok) for (int i = 0; i < input.guesses; ++i)
+                ok = ok && input.next[i] >= 0 && (uint32_t) input.next[i] < info.vocab;
+            int reused = 0;
+            if (ok && block_active) {
+                ok = input.keep >= 1 && input.keep <= block_rows && h.position == block_position + input.keep;
+                if (ok && input.keep < block_rows) {
+                    if (model.stage_window_pending()) ok = model.stage_discard(err);
+                    block_cached_tokens.clear(); block_cached = {};
+                    if (ok) ok = model.stage_block_checkpoint(0, false, err);
+                } else if (ok) {
+                    while (reused < (int) h.rows && reused < (int) block_cached_tokens.size() &&
+                           input.tokens[reused] == block_cached_tokens[(size_t) reused]) ++reused;
+                    if (model.stage_window_pending()) {
+                        if (reused) {
+                            const size_t n = (size_t) reused * info.hc * info.embd;
+                            ok = block_cached.residual.size() >= n;
+                            if (ok) result.residual.assign(block_cached.residual.begin(), block_cached.residual.begin() + n);
+                            if (ok) ok = reused == 2 ? model.stage_block_commit_full(err) : model.stage_commit(reused, err);
+                            if (ok && reused == 1 && h.rows == 2) ok = model.stage_block_checkpoint(0, true, err);
+                        } else ok = model.stage_discard(err);
+                    } else ok = block_cached_tokens.empty();
+                }
+            } else if (ok) {
+                ok = input.keep == 0 && h.position == model.position() && !model.stage_window_pending();
+            }
+            block_cached_tokens.clear(); block_cached = {};
+            if (ok) ok = model.position() == h.position + reused;
+            if (ok && reused < (int) h.rows) {
+                strata::core::Glm5Model::StageWindowResult rest;
+                const int n = (int) h.rows - reused;
+                ok = model.stage_window(input.tokens + reused, n, nullptr, 0, rest, err);
+                if (ok) ok = n == 2 ? model.stage_block_commit_full(err) : model.stage_commit(n, err);
+                if (ok) result.residual.insert(result.residual.end(), rest.residual.begin(), rest.residual.end());
+            }
+            if (ok) ok = model.position() == h.position + h.rows;
+            if (ok) {
+                block_active = true; block_position = h.position; block_rows = h.rows;
+                block_next.assign(input.next, input.next + input.guesses);
+                last_window = h.window;
+                st::BlockReply meta; meta.reused = reused;
+                if (reused == (int) h.rows) response.flags |= st::cache_hit;
+                slot_bytes.resize(sizeof(meta) + result.residual.size() * sizeof(float));
+                std::memcpy(slot_bytes.data(), &meta, sizeof(meta));
+                std::memcpy(slot_bytes.data() + sizeof(meta), result.residual.data(), result.residual.size() * sizeof(float));
+            }
+        } else if (ok && h.op == st::BlockForecast) {
+            ok = block_active && !streaming && !model.stage_window_pending() && block_cached_tokens.empty() &&
+                 h.window == last_window && h.rows >= 1 && h.rows <= 2 && data.size() == h.rows*sizeof(int32_t) &&
+                 h.position == model.position() && h.position == block_position + block_rows &&
+                 h.position <= info.context - h.rows;
+            if (ok) {
+                block_next.resize(h.rows); std::memcpy(block_next.data(), data.data(), data.size());
+                for (auto t : block_next) ok = ok && t >= 0 && (uint32_t) t < info.vocab;
+            }
+        } else if (ok && h.op == st::BlockEnd) {
+            ok = block_active && !streaming && data.empty() && !h.window && h.rows >= 1 &&
+                 h.rows <= (uint32_t) block_rows && h.position == block_position + h.rows;
+            if (ok && model.stage_window_pending()) ok = model.stage_discard(err);
+            if (ok && h.rows < (uint32_t) block_rows) {
+                ok = model.stage_block_checkpoint(0, false, err);
+            }
+            if (ok) {
+                ok = model.position() == h.position && !model.stage_window_pending();
+                block_active = false; block_rows = 0; block_cached_tokens.clear(); block_cached = {};
             }
         } else if (ok && h.op == st::StreamStep) {
             ok = h.rows == 1 && data.size() == 2 * sizeof(int32_t) && h.window == last_window + 1 &&
@@ -241,6 +326,12 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "stage stream prefetch: %s\n", err.c_str()); return 1;
             }
             cached_token = next_prefetch;
+        }
+        if (!block_next.empty()) {
+            if (!model.stage_window(block_next.data(), (int) block_next.size(), nullptr, 0, block_cached, err)) {
+                std::fprintf(stderr, "stage block prefetch: %s\n", err.c_str()); return 1;
+            }
+            block_cached_tokens = std::move(block_next);
         }
     }
 }

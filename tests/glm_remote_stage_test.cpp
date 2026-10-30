@@ -33,10 +33,42 @@ void peer(int fd, int mode) {
     uint64_t seq = 0;
     int32_t guessed = -1;
     int64_t position = 0;
+    int block_rows = 0; int64_t block_position = 0;
+    std::vector<int32_t> block_guesses;
     while (st::receive_packet(fd, h, data, err)) {
         if (h.session != session || h.sequence != ++seq) std::abort();
         h.flags = st::reply;
-        if (h.op == st::StreamStep) {
+        if (h.op == st::BlockStep) {
+            st::BlockInput input;
+            if (data.size() != sizeof(input)) std::abort();
+            std::memcpy(&input, data.data(), sizeof(input));
+            if (block_rows && (input.keep < 1 || input.keep > block_rows || h.position != block_position + input.keep)) std::abort();
+            st::BlockReply meta;
+            if (block_rows && input.keep == block_rows)
+                while (meta.reused < h.rows && meta.reused < block_guesses.size() &&
+                       input.tokens[meta.reused] == block_guesses[meta.reused]) ++meta.reused;
+            if (meta.reused == h.rows) h.flags |= st::cache_hit;
+            block_position = h.position; block_rows = h.rows;
+            block_guesses.assign(input.next, input.next + input.guesses);
+            h.position += h.rows;
+            std::vector<float> residual((size_t) h.rows * i.hc * i.embd, .625f);
+            if (mode == 13) meta.reused ^= 1;
+            if (mode == 14) residual.pop_back();
+            if (mode == 15) --h.position;
+            if (mode == 16) meta.reserved = 1;
+            std::vector<uint8_t> payload(sizeof(meta) + residual.size()*sizeof(float));
+            std::memcpy(payload.data(), &meta, sizeof(meta));
+            std::memcpy(payload.data()+sizeof(meta), residual.data(), residual.size()*sizeof(float));
+            if (!st::send_packet(fd, h, payload.data(), payload.size(), err)) break;
+        } else if (h.op == st::BlockForecast) {
+            if (!block_rows || data.size()!=h.rows*sizeof(int32_t) || h.position!=block_position+block_rows) std::abort();
+            block_guesses.resize(h.rows);std::memcpy(block_guesses.data(),data.data(),data.size());
+            if (!st::send_packet(fd,h,nullptr,0,err)) break;
+        } else if (h.op == st::BlockEnd) {
+            if (!block_rows || h.rows < 1 || h.rows > (unsigned) block_rows || h.position != block_position + h.rows) std::abort();
+            block_rows = 0; block_guesses.clear();
+            if (!st::send_packet(fd, h, nullptr, 0, err)) break;
+        } else if (h.op == st::StreamStep) {
             if (data.size() != 2 * sizeof(int32_t)) std::abort();
             int32_t input[2]; std::memcpy(input, data.data(), sizeof(input));
             if (guessed == input[0]) h.flags |= st::cache_hit;
@@ -99,6 +131,7 @@ void peer(int fd, int mode) {
         } else {
             if (!data.empty()) std::abort();
             if (h.op == st::Reset || h.op == st::StreamEnd) guessed = -1;
+            if (h.op == st::Reset) { block_rows = 0; block_guesses.clear(); }
             if (h.op == st::Commit) h.position += h.rows;
             if (!st::send_packet(fd, h, nullptr, 0, err)) break;
         }
@@ -110,7 +143,7 @@ void peer(int fd, int mode) {
 int main() {
     std::string err;
     st::Header h;
-    for (uint32_t op = st::Hello; op <= st::PrefillStream; ++op) {
+    for (uint32_t op = st::Hello; op <= st::BlockForecast; ++op) {
         h.op = op;
         require(st::valid_header(h, err), "valid opcode");
     }
@@ -228,6 +261,46 @@ int main() {
         require(!client.prefill_stream(0,std::vector<int32_t>(33,1),2,16,
             [](size_t,const std::vector<float>&,std::string&){return true;},err) && !client.ready(),"bad streamed frame poisons connection");
         client.close();server.join();
+    }
+    for (int mode : {0, 13, 14, 15, 16}) {
+        int sockets[2]; require(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0, "block socketpair");
+        std::thread server(peer, sockets[1], mode); GlmRemoteStage client;
+        require(client.open_connected(sockets[0], info(), err), "block hello");
+        std::vector<float> residual; int reused = -1;
+        int32_t input[2] = {1,2}, guesses[2] = {3,4};
+        require(!client.block_commit(1,err), "block commit requires window");
+        require(!client.block_step(0,input,3,guesses,2,residual,reused,err), "block rows bounded");
+        const bool ok = client.block_step(0,input,2,guesses,2,residual,reused,err);
+        if (mode) require(!ok && !client.ready(), "malformed block reply poisons connection");
+        else {
+            require(ok && reused==0 && residual.size()==2*4*4096 && residual[0]==.625f, "initial FP32 block");
+            require(!client.block_end(err), "block end requires local commit");
+            require(!client.block_step(2,input,2,guesses,2,residual,reused,err), "no overlapping uncommitted block");
+            require(!client.save(2,err), "no snapshot while block speculation exists");
+            require(!client.block_commit(0,err) && !client.block_commit(3,err), "block keep bounded");
+            require(client.block_commit(2,err), "full local block commit");
+            require(!client.block_commit(2,err), "duplicate block commit rejected");
+            input[0]=3; input[1]=9; guesses[0]=10; guesses[1]=11;
+            require(client.block_step(2,input,2,guesses,2,residual,reused,err) && reused==1, "partial prefix reuse");
+            require(client.block_commit(1,err), "partial block commit");
+            input[0]=10; input[1]=11;
+            require(client.block_step(3,input,2,guesses,2,residual,reused,err) && reused==0, "reject invalidates forecasts even if IDs match");
+            require(client.block_commit(2,err) && client.block_end(err), "end drains speculative work");
+            require(client.save(5,err), "snapshot after block stream");
+            require(client.reset(err), "reset after block stream");
+            require(client.block_step(0,input,2,guesses,2,residual,reused,err), "restart block stream");
+            require(client.reset(err), "reset before block commit");
+            require(client.verify(0,input,1,residual,err) && client.commit(1,err), "ordinary path after block reset");
+            require(client.block_begin(1,input,2,nullptr,0,err), "asynchronous block request");
+            require(!client.block_begin(1,input,2,nullptr,0,err) && !client.reset(err) && !client.block_end(err), "inflight response must be drained");
+            require(client.block_finish(residual,reused,err) && reused==0, "asynchronous block response");
+            require(client.block_forecast(guesses,2,err), "lookahead supplied after current response");
+            require(!client.block_forecast(guesses,2,err), "duplicate forecast rejected");
+            require(client.block_commit(2,err), "async local commit");
+            require(client.block_step(3,guesses,2,nullptr,0,residual,reused,err) && reused==2, "forecast feeds following block");
+            require(client.block_commit(1,err) && client.block_end(err), "async partial end");
+        }
+        client.close(); server.join();
     }
     std::printf("glm_remote_stage_test: PASS (%d checks, actual CPU socket transport)\n", checks);
 }

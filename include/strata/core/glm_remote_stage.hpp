@@ -7,12 +7,15 @@
 
 namespace strata::core::stageproto {
 // Experimental homogeneous x86-64 protocol. FP32 residuals are transmitted without quantization.
-constexpr uint32_t magic = 0x3153474d, version = 5, reply = 1, failure = 2, cache_hit = 4, more = 8;
+constexpr uint32_t magic = 0x3153474d, version = 7, reply = 1, failure = 2, cache_hit = 4, more = 8;
 constexpr uint32_t max_prefill_rows = 32768;
 constexpr uint32_t max_payload = max_prefill_rows * 4u * 4096u * sizeof(float);
 enum Op : uint32_t { Hello = 1, Verify = 2, Commit = 3, Reset = 4, Save = 5, Restore = 6, Close = 7,
                      StreamStep = 8, StreamEnd = 9, Prefill = 10, CheckSave = 11, CheckSaveSnapshot = 12, CheckRestore = 13,
-                     SlotRead = 14, SlotWrite = 15, PrefillStream = 16 };
+                     SlotRead = 14, SlotWrite = 15, PrefillStream = 16, BlockStep = 17, BlockEnd = 18, BlockForecast = 19 };
+struct BlockInput { int32_t keep = 0, guesses = 0, tokens[2] = {-1,-1}, next[2] = {-1,-1}; };
+struct BlockReply { uint32_t reused = 0, reserved = 0; };
+static_assert(sizeof(BlockInput) == 24 && sizeof(BlockReply) == 8);
 struct Header {
     uint32_t magic_value = magic, version_value = version, op = 0, flags = 0;
     uint64_t session = 0, sequence = 0, window = 0;
@@ -56,17 +59,34 @@ public:
     bool stream_step(int64_t position, int32_t token, int32_t next_guess, std::vector<float>& residual,
                      bool& hit, std::string& err);
     bool stream_end(std::string& err);
+    bool block_step(int64_t position, const int32_t* tokens, int rows, const int32_t* next, int guesses,
+                    std::vector<float>& residual, int& reused, std::string& err);
+    bool block_begin(int64_t position, const int32_t* tokens, int rows, const int32_t* next, int guesses, std::string& err);
+    bool block_finish(std::vector<float>& residual, int& reused, std::string& err);
+    bool block_forecast(const int32_t* next, int guesses, std::string& err);
+    int block_reusable_prefix(const int32_t* tokens, int rows) const;
+    bool block_commit(int keep, std::string& err); // local acknowledgment, sent on next step/end
+    bool block_end(std::string& err);
+    bool block_streaming() const { return block_streaming_; }
     bool checkpoint(uint32_t op, int slot, int64_t position, std::string& err);
     bool slot_read(int64_t snapshot_position, std::vector<uint8_t>& bytes, std::string& err);
     bool slot_write(int64_t position, const std::vector<uint8_t>& bytes, std::string& err);
-    bool streaming() const { return streaming_; }
+    bool streaming() const { return streaming_ || block_streaming_; }
     bool ready() const { return fd_ >= 0; }
-    bool pending() const { return pending_rows_ > 0; }
+    bool pending() const { return pending_rows_ > 0 || block_flight_; }
     void close();
 private:
     int fd_ = -1, pending_rows_ = 0;
     bool streaming_ = false;
     int32_t stream_guess_ = -1;
+    bool block_streaming_ = false;
+    int block_rows_ = 0, block_keep_ = 0, block_guesses_ = 0;
+    int32_t block_next_[2] = {-1,-1};
+    int64_t block_position_ = 0;
+    bool block_flight_ = false;
+    stageproto::Header block_request_{};
+    stageproto::BlockInput block_input_{};
+    int block_expected_ = 0;
     int64_t position_ = 0, pending_position_ = 0, snapshot_position_ = -1;
     uint64_t session_ = 0, sequence_ = 0, window_ = 0;
     stageproto::Info info_{};

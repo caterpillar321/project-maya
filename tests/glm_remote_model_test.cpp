@@ -74,6 +74,59 @@ int main(int argc, char** argv) {
     require(model.load_pack_env(argv[1], context, err), err);
     require((local_diag || model.remote_front_enabled()) && model.mtp_ready(), "remote native MTP must be active");
     const size_t V = model.geometry().n_vocab;
+    const auto long_native_greedy = [&] {
+        // Actual low-effort Korean chat prompt, including the template's think marker. Cross several
+        // recurrent/indexer pool boundaries without forcing the emitted continuation.
+        const std::vector<int32_t> prompt = {154822,154824,154826,25062,287,29905,371,25,12035,154827,
+            145382,41436,59895,59284,28630,53595,17851,57456,78992,33720,57772,246,13,154828,154841};
+        require(context >= 256, "long native test needs at least 256 context tokens");
+        std::vector<std::vector<float>> prior_logits;
+        std::vector<int> prior_tokens;
+        for (int epoch = 0; epoch < 2; ++epoch) {
+            std::vector<float> logits;
+            std::vector<int> plain;
+            model.reset();
+            model.observe_stage_helper_usage();
+            require(model.forward(std::vector<int32_t>(prompt.begin(), prompt.end()-1), logits, err), err);
+            require(model.snapshot_save(), "save real chat prefix before its last token");
+            require(model.forward({prompt.back()}, logits, err), err);
+            bool same_prefix = true;
+            double epoch_max_abs = 0;
+            for (int i = 0; i < 160; ++i) {
+                const int token = pick(logits.data(), V); plain.push_back(token);
+                if (epoch == 0) prior_logits.push_back(logits);
+                else if (same_prefix) {
+                    double worst = 0;
+                    for (size_t j = 0; j < V; ++j) worst = std::max(worst, std::abs((double)logits[j]-prior_logits[i][j]));
+                    epoch_max_abs = std::max(epoch_max_abs, worst);
+                    if (token != prior_tokens[i]) {
+                        std::printf("helper ownership changed greedy at %d: %d -> %d, same-prefix logits max_abs=%g\n",
+                                    i, prior_tokens[i], token, worst);
+                        same_prefix = false;
+                    }
+                }
+                require(model.forward({token}, logits, err), err);
+            }
+            // Reuse the same saved prompt twice. The second restore follows block rollback checkpoints,
+            // as a server request does; those checkpoints must not overwrite the conversation snapshot.
+            for (int replay = 0; replay < 2; ++replay) {
+                require(model.snapshot_restore(), "restore real chat prefix after native generation");
+                require(model.forward({prompt.back()}, logits, err), err);
+                strata::kernels::SamplerParams sampler{}; sampler.greedy = true;
+                std::vector<int> speculative;
+                int64_t produced = 0;
+                require(model.decode_mtp(sampler, 160, [&](int token) { speculative.push_back(token); return true; }, produced, err), err);
+                sequence_difference(plain, speculative, "long native Korean greedy");
+                require(produced == 160 && plain == speculative, "160-token native Korean MTP equals plain decode");
+            }
+            if (epoch == 0) {
+                prior_tokens = plain;
+                require(model.refresh_stage_helper(err), err);
+            } else std::printf("helper ownership same-prefix logits max_abs=%g, all greedy equal=%d\n", epoch_max_abs, same_prefix);
+        }
+        std::puts("LONG NATIVE KOREAN GREEDY PASS (160 unforced tokens)");
+    };
+    if (std::getenv("MAYA_STAGE_LONG_GREEDY_ONLY")) { long_native_greedy(); return 0; }
     const bool refresh = std::getenv("STRATA_GLM_STAGE_HELPER_REFRESH") != nullptr;
     // Forced valid token IDs isolate state/geometry from tokenizer and sampling changes. The speed harness is separate.
     std::vector<int32_t> tokens;
@@ -275,6 +328,41 @@ int main(int argc, char** argv) {
     require(model.forward({tokens[0]}, logits, err), err);
     compare(reference[0].data(), logits.data(), V, "reset during front speculation");
 
+    // Two-row front speculation: exact, partial and rejected blocks at indexer-pool boundaries.
+    for (int pre : {0, 3, 31, 32}) for (int mode : {0, 1, 2, 3}) {
+        model.reset();
+        if (pre) require(model.forward(std::vector<int32_t>(tokens.begin(), tokens.begin()+pre), logits, err), err);
+        int p = pre;
+        for (int step = 0; step < 3; ++step) {
+            const int keep = mode == 3 && (step & 1) ? 1 : 2;
+            int32_t input[2] = {tokens[p], tokens[p+1] + (keep == 1 ? 1 : 0)};
+            int32_t next[2] = {tokens[p+2] + (mode == 1 ? 1 : 0), tokens[p+3] + (mode == 2 ? 1 : 0)};
+            strata::core::Glm5Model::StageWindowResult r;
+            require(model.stage_block_window(input, 2, next, 2, r, err, true), err);
+            for (int row = 0; row < keep; ++row)
+                compare(reference[p+row].data(), r.logits.data()+(size_t)row*V, V, "block stream row");
+            require(model.stage_commit(keep, err), err); p += keep;
+            require(model.position() == p, "block stream accepted position");
+        }
+        require(model.stage_block_finish(err), err);
+        require(model.forward({tokens[p]}, logits, err), err);
+        compare(reference[p].data(), logits.data(), V, "plain after block stream");
+    }
+    model.reset();
+    {
+        strata::core::Glm5Model::StageWindowResult r;
+        require(model.stage_block_window(tokens.data(), 2, tokens.data()+2, 2, r, err), err);
+        require(model.stage_commit(1, err), err);
+        require(model.stage_block_finish(err), err); // final partial keep rolls back the already-speculated front
+        require(model.forward({tokens[1]}, logits, err), err);
+        compare(reference[1].data(), logits.data(), V, "partial block end");
+        model.reset();
+        require(model.stage_block_window(tokens.data(), 2, tokens.data()+2, 2, r, err), err);
+        model.reset(); // reset with both an uncommitted tail and a speculative front
+        require(model.forward({tokens[0]}, logits, err), err);
+        compare(reference[0].data(), logits.data(), V, "reset during block speculation");
+    }
+
     // Native MTP must match the SAME distributed trunk's ordinary greedy generation, including state after rejection.
     model.reset();
     if (refresh) {
@@ -328,6 +416,7 @@ int main(int argc, char** argv) {
     require(model.decode_mtp(sampler, 24, [&](int) { return ++callbacks < 7; }, produced, err), err);
     require(produced == 7 && model.position() == (int64_t) prefix.size()+6, "decode callback cancellation drains stages");
     require(model.snapshot_save(), "snapshot allowed after cancelled generation");
+    if (context >= 256) long_native_greedy();
     model.fast_prof_flush();
     std::printf("glm_remote_model_test: PASS (%d checks; T2/T3 every keep, pool boundaries, snapshot, MTP)\n", checks);
 }
