@@ -855,6 +855,15 @@ void Glm5Model::reset() {
     // waits on it - the next conversation's prompt read the previous one's state, and the memset landed in the middle
     // of it (#133: a conversation taken back from a slot answered the other one's question, then looped).
     if (fast_ != nullptr) {
+        if (fast_->win.dma) {
+            std::string dma_err;
+            const bool compute_ok = cudaStreamSynchronize(fast_->cs) == cudaSuccess;
+            const bool dma_ok = fast_->win.dma->drain(dma_err);
+            if (!compute_ok || !dma_ok) {
+                stage_failed_ = true;
+                std::fprintf(stderr, "glm reset: demand DMA drain failed: %s\n", dma_err.c_str());
+            }
+        }
         // A failed overlap launch may return before its ordinary compute-stream join was enqueued.
         // Do not let a later request reuse the private expert scratch while those copies are still running.
         if (fast_->win.ev_fetch_ready && fast_->ps) {

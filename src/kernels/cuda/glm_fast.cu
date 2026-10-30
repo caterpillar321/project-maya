@@ -4446,6 +4446,45 @@ __global__ void __launch_bounds__(256) moe_prefetch_kernel(MoeDev d, size_t n16)
     }
 }
 
+__global__ void moe_dma_submit_kernel(MoeDev d, int k, size_t bytes, MoeDmaRequest* rq, unsigned int* state) {
+    const int i = threadIdx.x;
+    if (i < 8) {
+        rq->src[i] = i < k ? d.fetch_src[i] : 0ull;
+        rq->dst[i] = i < k ? d.plan_ptr[i] : 0ull;
+    }
+    if (i == 0) rq->bytes = bytes;
+    __threadfence_system();
+    __syncthreads();
+    if (i == 0) {
+        unsigned int seq = state[0] + 1u;
+        if (!seq) seq = 1u;
+        state[0] = seq;
+        __threadfence_system();
+        rq->seq = seq;
+    }
+}
+
+__global__ void moe_dma_complete_kernel(unsigned int* state, unsigned int seq) {
+    __threadfence_system(); // preceding DMA writes are ordered on this same stream
+    *(volatile unsigned int*) (state + 1) = seq;
+}
+
+__global__ void moe_dma_wait_kernel(MoeDev d, const MoeDmaRequest* rq, const unsigned int* state) {
+    const unsigned int seq = state[0];
+    const unsigned long long begin = clock64();
+    while (*(volatile const unsigned int*) (state + 1) != seq) {
+        if (rq->error || clock64() - begin > (1ull << 36)) {
+            if (!rq->error) const_cast<MoeDmaRequest*>(rq)->error = -1;
+            if (d.route_error) *d.route_error = -101;
+            return;
+        }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700 && !defined(STRATA_USE_HIP)
+        __nanosleep(128);
+#endif
+    }
+    __threadfence_system();
+}
+
 // one block per SM, 16-byte loads: the PCIe pull measured 11.5 GB/s (a little over cudaMemcpy's 10.7)
 template<MoeFetchPhase phase>
 __global__ void __launch_bounds__(256) moe_fetch_kernel(MoeDev d, int k, size_t n16) {
@@ -6391,6 +6430,21 @@ void moe_prefetch(const MoeDev& d, size_t blob_bytes, cudaStream_t s) {
     }();
     moe_prefetch_kernel<<<blocks_env > 0 ? blocks_env : std::max(1, sms / 2), 256, 0, s>>>(d, (blob_bytes + 15) / 16);
     launch_check("moe_prefetch");
+}
+
+void moe_dma_submit(const MoeDev& d, int k, size_t bytes, MoeDmaRequest* rq, unsigned int* state, cudaStream_t s) {
+    moe_dma_submit_kernel<<<1, 32, 0, s>>>(d, k, (bytes + 15) / 16 * 16, rq, state);
+    launch_check("moe_dma_submit");
+}
+bool moe_dma_complete(unsigned int* state, unsigned int seq, cudaStream_t s) {
+    moe_dma_complete_kernel<<<1, 1, 0, s>>>(state, seq);
+    const bool ok = cudaPeekAtLastError() == cudaSuccess;
+    launch_check("moe_dma_complete");
+    return ok;
+}
+void moe_dma_wait(const MoeDev& d, const MoeDmaRequest* rq, const unsigned int* state, cudaStream_t s) {
+    moe_dma_wait_kernel<<<1, 1, 0, s>>>(d, rq, state);
+    launch_check("moe_dma_wait");
 }
 
 void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s, MoeFetchPhase phase) {

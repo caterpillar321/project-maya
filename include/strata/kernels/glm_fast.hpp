@@ -375,6 +375,18 @@ void moe_wait(const MoeDev& d, int n_embd, cudaStream_t s);
 // The split phases require a row-private wait_seq. moe_wait preserves it: nonzero means this row had a disk miss.
 // Such rows fetch immediately, before the next route can reuse host staging; other rows may fetch after routing.
 enum class MoeFetchPhase { All, HasDiskMiss, NoDiskMiss };
+// One in-flight T1 demand copy. The GPU publishes seq last; the CPU only reads addresses after seq changes.
+// Completion lives in device memory, separate from this host-mapped request (state[submitted, completed]).
+struct MoeDmaRequest {
+    volatile unsigned int seq = 0;
+    volatile int error = 0;
+    unsigned long long src[8] = {}, dst[8] = {};
+    size_t bytes = 0;
+};
+void moe_dma_submit(const MoeDev& d, int k, size_t bytes, MoeDmaRequest* request,
+                    unsigned int* state, cudaStream_t s);
+bool moe_dma_complete(unsigned int* state, unsigned int seq, cudaStream_t s);
+void moe_dma_wait(const MoeDev& d, const MoeDmaRequest* request, const unsigned int* state, cudaStream_t s);
 void moe_fetch(const MoeDev& d, int k, size_t blob_bytes, cudaStream_t s,
                MoeFetchPhase phase = MoeFetchPhase::All);
 /// moe_wait then moe_fetch as ONE launch (the same effects; STRATA_GLM_SKIP_EMPTY's batched rows): a route with no

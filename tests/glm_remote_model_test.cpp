@@ -36,6 +36,14 @@ void compare(const float* reference, const float* result, size_t n, const char* 
 }
 int main(int argc, char** argv) {
     strata::platform::env_aliases();
+    // Match the real generation entry point: lazy kernel loading can deadlock a host-submitted DMA lane.
+    if (std::getenv("CUDA_MODULE_LOADING") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+#else
+        setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+#endif
+    }
     if (argc < 3 || argc > 4) { std::fprintf(stderr, "usage: glm_remote_model_test PACK PROFILE [CONTEXT]\n"); return 2; }
     char* end = nullptr;
     const long long context = argc == 4 ? std::strtoll(argv[3], &end, 10) : 4096;

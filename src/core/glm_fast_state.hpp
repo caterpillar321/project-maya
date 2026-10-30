@@ -365,6 +365,19 @@ std::string usage_file();
 // - the token path's routes and the verify windows' alike
 int trunk_skip_from(int il);
 
+// Dedicated host submission lane for opt-in T1 DMA. Owned by Win; no CUDA callback calls CUDA APIs.
+struct WindowDmaFetch {
+    gf::MoeDmaRequest *host = nullptr, *device = nullptr;
+    unsigned int* state = nullptr;
+    cudaStream_t stream = nullptr;
+    std::atomic<bool> quit{false};
+    std::thread worker;
+    uint64_t jobs = 0, bytes = 0;
+    bool init(int dev, std::string& err);
+    bool drain(std::string& err);
+    ~WindowDmaFetch();
+};
+
 }  // namespace glmfast
 
 namespace gf = strata::kernels::glmf;
@@ -802,6 +815,7 @@ struct Glm5Model::FastState {
         int* prefetch_n = nullptr;
         bool prefetch_pending = false;
         cudaEvent_t ev_fetch_ready = nullptr, ev_fetch_done = nullptr;
+        std::unique_ptr<glmfast::WindowDmaFetch> dma;
         void* dhq = nullptr;
         float* head_x = nullptr;
         void* head_xq = nullptr;
@@ -1029,6 +1043,7 @@ struct Glm5Model::FastState {
         if (helper_failed.load(std::memory_order_acquire)) { err = helper_error; return false; }
         const int e = route_error_h ? *route_error_h : 0;
         if (e == 0) return true;
+        if (e == -101) { err = "glm demand DMA: copy submission failed or completion timed out"; return false; }
         const char* kind = (e % 4 == 1) ? "decode" : (e % 4 == 2) ? "predicted" : "lookahead";
         err = "glm router: layer " + std::to_string(e / 4) + " " + kind + " invalid expert ID or non-finite score";
         return false;

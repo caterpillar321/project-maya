@@ -5398,7 +5398,7 @@ void Glm5Model::fast_service() {
             uint64_t nh = 0;
             for (int i = 0; i < K; ++i) {
                 const int key = il * g.n_expert + ids[i];
-                if (rq->win_n > 1 && prefetched_window_keys[(size_t) key]) {
+                if (rq->win_n > 0 && prefetched_window_keys[(size_t) key]) {
                     F->window_prefetch_used.fetch_add(1, std::memory_order_relaxed);
                     prefetched_window_keys[(size_t) key] = 0;
                 }
@@ -5461,7 +5461,7 @@ void Glm5Model::fast_service() {
             }
             // the next layer's experts this route prefetched into that layer's spares: resident from now on
             const int npf = rq->pf_n;
-            if (rq->win_n > 1 && rq->win >= rq->win_n - 1)
+            if (rq->win_n > 0 && rq->win >= rq->win_n - 1)
                 std::fill_n(prefetched_window_keys.data() + (size_t) il * g.n_expert, g.n_expert, uint8_t{0});
             if (npf > 0 && il + 1 < (int) F->lp.size()) {
                 auto& P1 = F->lp[(size_t) il + 1];
@@ -5469,7 +5469,7 @@ void Glm5Model::fast_service() {
                 for (int q2 = 0; q2 < npf && q2 < 8; ++q2) {
                     const int e = rq->pf_ids[q2];
                     const int key = (il + 1) * g.n_expert + e;
-                    if (rq->win_n > 1) {
+                    if (rq->win_n > 0) {
                         prefetched_window_keys[(size_t) key] = 1;
                         F->window_prefetch_issued.fetch_add(1, std::memory_order_relaxed);
                     }

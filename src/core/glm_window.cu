@@ -39,6 +39,75 @@ namespace gf = strata::kernels::glmf;
 
 namespace strata::core {
 
+bool glmfast::WindowDmaFetch::init(int dev, std::string& err) {
+    cudaDeviceProp prop{};
+    if (!cuda_ok(cudaGetDeviceProperties(&prop, dev), "DMA device properties", err)) return false;
+    if (!prop.unifiedAddressing) { err = "glm demand DMA requires unified addressing"; return false; }
+    if (!cuda_ok(cudaHostAlloc((void**) &host, sizeof(*host), cudaHostAllocMapped), "DMA request allocation", err)) return false;
+    std::memset(host, 0, sizeof(*host));
+    if (!cuda_ok(cudaHostGetDevicePointer((void**) &device, host, 0), "DMA request mapping", err) ||
+        !cuda_ok(cudaMalloc((void**) &state, 2 * sizeof(unsigned int)), "DMA completion allocation", err) ||
+        !cuda_ok(cudaMemset(state, 0, 2 * sizeof(unsigned int)), "DMA completion initialization", err) ||
+        !cuda_ok(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "DMA copy stream", err)) return false;
+    // CUDA lazy loading can synchronize the context on a kernel's first launch. Load the completion kernel
+    // before the compute stream can wait for it; otherwise its first worker-side launch deadlocks that wait.
+    if (!gf::moe_dma_complete(state, 0, stream)) { err = "DMA completion kernel initialization failed"; return false; }
+    if (!cuda_ok(cudaStreamSynchronize(stream), "DMA completion kernel warmup", err)) return false;
+    worker = std::thread([this, dev] {
+        cudaError_t e = cudaSetDevice(dev);
+        if (e != cudaSuccess) { host->error = (int) e; return; }
+        unsigned int seen = 0, polls = 0;
+        auto last = std::chrono::steady_clock::now();
+        while (!quit.load(std::memory_order_relaxed) && !host->error) {
+            const unsigned int seq = host->seq;
+            if (seq == seen || !seq) {
+                cpu_relax();
+                if ((++polls & 1023u) == 0 && std::chrono::steady_clock::now() - last > std::chrono::milliseconds(1))
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+                continue;
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            seen = seq;
+            last = std::chrono::steady_clock::now();
+            const size_t n = host->bytes;
+            for (int i = 0; i < 8 && e == cudaSuccess; ++i) {
+                if (!host->src[i]) continue;
+                // All sources are pinned host mappings, including the disk-miss staging resolved by moe_wait.
+                // Default resolves UVA aliases; it does not assume host and device aliases have identical values.
+                e = cudaMemcpyAsync((void*) host->dst[i], (const void*) host->src[i], n, cudaMemcpyDefault, stream);
+                bytes += n;
+            }
+            if (e == cudaSuccess && !gf::moe_dma_complete(state, seq, stream)) e = cudaErrorLaunchFailure;
+            if (e != cudaSuccess) {
+                std::fprintf(stderr, "glm demand DMA: %s\n", cudaGetErrorString(e));
+                std::atomic_thread_fence(std::memory_order_release);
+                host->error = (int) e;
+                return;
+            }
+            ++jobs;
+        }
+    });
+    std::fprintf(stderr, "glm demand DMA: CUDA%d host submission lane active; private T1 only\n", dev);
+    return true;
+}
+
+bool glmfast::WindowDmaFetch::drain(std::string& err) {
+    if (stream && !cuda_ok(cudaStreamSynchronize(stream), "DMA stream drain", err)) return false;
+    if (host && host->error) { err = "glm demand DMA error " + std::to_string(host->error); return false; }
+    return true;
+}
+
+glmfast::WindowDmaFetch::~WindowDmaFetch() {
+    quit.store(true, std::memory_order_relaxed);
+    if (worker.joinable()) worker.join();
+    if (stream) cudaStreamSynchronize(stream);
+    if (jobs) std::fprintf(stderr, "glm demand DMA: %llu requests, %llu bytes copied\n",
+                          (unsigned long long) jobs, (unsigned long long) bytes);
+    if (stream) cudaStreamDestroy(stream);
+    if (state) cudaFree(state);
+    if (host) cudaFreeHost(host);
+}
+
 namespace {
 
 bool window_prefetch_on() {
@@ -335,6 +404,8 @@ void Glm5Model::win_free() {
     win_crew_stop();
     if (fast_ == nullptr) return;
     auto& W = fast_->win;
+    // Keep the submission thread alive until all compute-side requests have retired, including cancellation.
+    if (W.dma) { cudaStreamSynchronize(fast_->cs); W.dma.reset(); }
     if (W.ev_fetch_ready && fast_->ps) cudaStreamSynchronize(fast_->ps);
     for (cudaEvent_t e : W.ev_tok)
         if (e) cudaEventDestroy(e);
@@ -658,6 +729,24 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     }();
     const bool resident_overlap = resident_overlap_env && window_pf && private_scratch && T == 1 &&
                                   !Ly.exl3 && !F->all_resident;
+    static const bool demand_dma = [] {
+        const char* v = getenv("STRATA_GLM_WIN_DEMAND_DMA");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    static const bool eager_modules = [] {
+        const char* v = getenv("CUDA_MODULE_LOADING");
+        return v && std::strcmp(v, "EAGER") == 0;
+    }();
+    static const bool dma_early = [] {
+        const char* v = getenv("STRATA_GLM_WIN_DEMAND_DMA_EARLY");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    if (resident_overlap && demand_dma && !eager_modules) {
+        // Any later attention/FFN kernel's first load can synchronize the context while a DMA submission
+        // is pending. That blocks the submitting CPU thread too. Refuse the configuration before any wait.
+        err = "glm demand DMA requires CUDA_MODULE_LOADING=EAGER at process startup";
+        return false;
+    }
     // A full T2/T3 layer consumes every row before the next layer overwrites scratch. Staggered A(l+1) can
     // overwrite A(l) before B(l) computes, so split groups must never share these private weights.
     const bool fetch_reuse = F->win_fetch_reuse && private_scratch && batch_env && part == 0 &&
@@ -783,24 +872,41 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             // Prefetched pointers count as resident, so join their writes before using that group. Use the
             // existing side stream for demand copies: a separate stream competing with speculative copies
             // regressed the home agent replay. Only resident experts run before the demand completion event.
+            if (demand_dma) {
+                if (!W.dma) {
+                    auto dma = std::make_unique<glmfast::WindowDmaFetch>();
+                    if (!dma->init(dev_, err)) return false;
+                    W.dma = std::move(dma);
+                    std::fprintf(stderr, "glm demand DMA: early submission %s\n", dma_early ? "on" : "off");
+                }
+                // Demand private-scratch destinations and the prior prefetch's resident slots are disjoint.
+                // Publish early to hide host dispatch behind the prior prefetch, as the original SM-fetch
+                // path also copied demand weights before joining that prefetch. Resident compute still waits.
+                if (dma_early) gf::moe_dma_submit(tok_dev(t0), g.n_exp_used, Ly.blob, W.dma->device, W.dma->state, s);
+            }
             if (W.prefetch_pending && !glmfast::cuda_ok(cudaStreamWaitEvent(s, F->ev_pf_prev, 0),
                                                        "resident overlap prior prefetch", err)) return false;
             W.prefetch_pending = false;
-            if ((!W.ev_fetch_ready && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_ready, cudaEventDisableTiming),
-                                                       "resident overlap ready event", err)) ||
-                (!W.ev_fetch_done && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_done, cudaEventDisableTiming),
-                                                      "resident overlap done event", err))) return false;
-            if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_ready, s), "resident overlap route ready", err) ||
-                !glmfast::cuda_ok(cudaStreamWaitEvent(F->ps, W.ev_fetch_ready, 0), "resident overlap copy wait", err)) return false;
-            gf::moe_fetch(tok_dev(t0), g.n_exp_used, Ly.blob, F->ps);
-            if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_done, F->ps), "resident overlap copies done", err)) return false;
+            if (demand_dma) {
+                if (!dma_early) gf::moe_dma_submit(tok_dev(t0), g.n_exp_used, Ly.blob, W.dma->device, W.dma->state, s);
+            } else {
+                if ((!W.ev_fetch_ready && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_ready, cudaEventDisableTiming),
+                                                           "resident overlap ready event", err)) ||
+                    (!W.ev_fetch_done && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_done, cudaEventDisableTiming),
+                                                          "resident overlap done event", err))) return false;
+                if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_ready, s), "resident overlap route ready", err) ||
+                    !glmfast::cuda_ok(cudaStreamWaitEvent(F->ps, W.ev_fetch_ready, 0), "resident overlap copy wait", err)) return false;
+                gf::moe_fetch(tok_dev(t0), g.n_exp_used, Ly.blob, F->ps);
+                if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_done, F->ps), "resident overlap copies done", err)) return false;
+            }
             gf::MoeWin ready = make_mw(nullptr);
             ready.fetch_src = W.mfetch + 8 * t0; ready.fetch_phase = 1;
             if (!gf::moe_win_experts(Ly.gu_type, Ly.d_type, ready, s)) {
                 err = "glm window: resident expert phase unsupported"; return false;
             }
             trace("moe_resident_experts");
-            if (!glmfast::cuda_ok(cudaStreamWaitEvent(s, W.ev_fetch_done, 0), "resident overlap demand join", err)) return false;
+            if (demand_dma) gf::moe_dma_wait(tok_dev(t0), W.dma->device, W.dma->state, s);
+            else if (!glmfast::cuda_ok(cudaStreamWaitEvent(s, W.ev_fetch_done, 0), "resident overlap demand join", err)) return false;
             trace("moe_demand_join");
         }
         if (window_pf) {

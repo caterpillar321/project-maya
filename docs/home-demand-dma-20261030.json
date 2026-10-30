@@ -1,0 +1,96 @@
+{
+  "date": "2026-10-30",
+  "selected": "Existing resident-overlap engine a1d313b; DMA disabled at user direction due CPU tradeoff",
+  "method": "Same captured 15 coding-agent requests, 8696 output tokens, exact output IDs and prefix reuse, same recorded tool gaps; all runs EAGER kernels, 1756 primary expert slots, same helper refresh128 policy",
+  "runs": [
+    {
+      "main_cpu_seconds": 586.02,
+      "main_cpu_percent": 227.89978336396365,
+      "mode": "dma",
+      "run": "/home/caterpillar/fn/remote-stage-dma-dma-20261030a",
+      "wall_with_tool_gaps": 257.1393405250001,
+      "request_wall": 243.38706142199953,
+      "prompt_ms": 44071.9,
+      "decode_ms": 194802.2,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.7291858325667,
+      "aggregate_speed": 44.63542135842895,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6218.336
+    },
+    {
+      "main_cpu_seconds": 423.70000000000005,
+      "main_cpu_percent": 164.11744490039723,
+      "mode": "control",
+      "run": "/home/caterpillar/fn/remote-stage-dma-control-20261030a",
+      "wall_with_tool_gaps": 258.1687767910007,
+      "request_wall": 244.42156849299863,
+      "prompt_ms": 44071.8,
+      "decode_ms": 195838.80000000002,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.445078196872124,
+      "aggregate_speed": 44.40310049653247,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6214.679
+    },
+    {
+      "main_cpu_seconds": 583.21,
+      "main_cpu_percent": 227.75082195697703,
+      "mode": "early",
+      "run": "/home/caterpillar/fn/remote-stage-dma-early-20261030a",
+      "wall_with_tool_gaps": 256.0737190709988,
+      "request_wall": 242.321530291998,
+      "prompt_ms": 44042.799999999996,
+      "decode_ms": 193759.2,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.96183302667893,
+      "aggregate_speed": 44.87863595783039,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6226.484
+    }
+  ],
+  "correctness": {
+    "dma_gate": "/home/caterpillar/fn/remote-stage-dma-test-20261030b",
+    "early_gate": "/home/caterpillar/fn/remote-stage-dma-test-20261030c",
+    "logit_comparisons_per_gate": 139,
+    "max_abs": 0,
+    "max_relative_l2": 0,
+    "all_picks_equal": true,
+    "gpu_protocol_cases": 21,
+    "cpu_tests_passed": 4
+  },
+  "flags": {
+    "MAYA_GLM_WIN_DEMAND_DMA": "experimental, default off",
+    "MAYA_GLM_WIN_DEMAND_DMA_EARLY": "experimental, default off",
+    "CUDA_MODULE_LOADING": "EAGER required for DMA; already default in generation entry point"
+  },
+  "payload": {
+    "scope": "Main route expert payload requests, not physical PCIe counters",
+    "ram_fetch_bytes": 4198883917824,
+    "prefetch_bytes": 2148573904896,
+    "bytes_per_output": 729928452.474701,
+    "dma_lane_bytes": 4103987527680
+  },
+  "limitations": [
+    "New path increases main CPU consumption by about 0.64 core for small throughput gains.",
+    "Prefetch selected-next-layer ratio does not prove later cache entries are useless.",
+    "Forced replay is disabled in normal service."
+  ],
+  "prefetch_observation": {
+    "run": "/home/caterpillar/fn/remote-stage-dma-early-20261030a",
+    "reports": 15,
+    "issued": 161199,
+    "selected_next_layer": 110656,
+    "selected_fraction": 0.6864558713143382,
+    "scope": "Reported T1/T2/T3 window counters, possibly including small window-prefill tails; not proof of future cache usefulness"
+  }
+}
