@@ -350,6 +350,10 @@ struct MoeWin {
     int T = 0, k = 0, n_embd = 0, n_ff = 0;
     float limit = 0.0f;
     size_t down_off = 0;
+    // Optional T1 split: phase 1 groups/calculates entries ready in VRAM, phase 2 calculates fetched entries
+    // and performs the original ordered combine. Both phases use the same plan and disjoint partial rows.
+    const unsigned long long* fetch_src = nullptr;
+    int fetch_phase = 0; // 0: original complete operation; 1: resident; 2: fetched + combine
 };
 constexpr int kMaxWinTokens = kMaxMvCols;   // the window's tokens moe_win_experts groups (16 x 8 entries)
 bool moe_win_experts(int gu_type, int d_type, const MoeWin& w, cudaStream_t s);

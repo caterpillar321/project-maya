@@ -801,6 +801,7 @@ struct Glm5Model::FastState {
         unsigned long long* prefetch_buf = nullptr;   // [2 layer parities][tmax][src8,dst8]
         int* prefetch_n = nullptr;
         bool prefetch_pending = false;
+        cudaEvent_t ev_fetch_ready = nullptr, ev_fetch_done = nullptr;
         void* dhq = nullptr;
         float* head_x = nullptr;
         void* head_xq = nullptr;

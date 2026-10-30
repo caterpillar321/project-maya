@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-30",
+  "method": "Same captured Claude coding three-task agent workload: 15 requests, 8696 output tokens; exact input/output IDs, prefix reuse and recorded tool gaps. Before/after helper refresh128 enabled for all runs.",
+  "quantization": "IQ4_XS weights, INT8 KV, FP32 stage boundary; unchanged",
+  "selected": "final",
+  "runs": [
+    {
+      "mode": "off",
+      "run": "/home/caterpillar/fn/remote-stage-overlap-off-20261030a",
+      "wall_with_tool_gaps": 260.3994803410005,
+      "request_wall": 246.65197391199945,
+      "prompt_ms": 44062.9,
+      "decode_ms": 198071.8,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 43.96136154553818,
+      "aggregate_speed": 43.904062756556165,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6227.197
+    },
+    {
+      "mode": "on",
+      "run": "/home/caterpillar/fn/remote-stage-overlap-on-20261030a",
+      "wall_with_tool_gaps": 257.7847385740006,
+      "request_wall": 244.0349689779996,
+      "prompt_ms": 44055.5,
+      "decode_ms": 195467.1,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.56880174793008,
+      "aggregate_speed": 44.48909270286791,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6221.201
+    },
+    {
+      "mode": "on64",
+      "run": "/home/caterpillar/fn/remote-stage-overlap-on64-20261030a",
+      "wall_with_tool_gaps": 257.94195364999996,
+      "request_wall": 244.1893330540015,
+      "prompt_ms": 44056.3,
+      "decode_ms": 195619.4,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.52176862925483,
+      "aggregate_speed": 44.45626627585778,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6219.92
+    },
+    {
+      "mode": "stream",
+      "run": "/home/caterpillar/fn/remote-stage-overlap-stream-20261030a",
+      "wall_with_tool_gaps": 259.8975404849989,
+      "request_wall": 246.1449828240011,
+      "prompt_ms": 44056.4,
+      "decode_ms": 197577.2,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.090420883164676,
+      "aggregate_speed": 44.01264543633507,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6212.09
+    },
+    {
+      "mode": "final",
+      "run": "/home/caterpillar/fn/remote-stage-overlap-final-20261030a",
+      "wall_with_tool_gaps": 258.07569003200115,
+      "request_wall": 244.3230979150012,
+      "prompt_ms": 44041.4,
+      "decode_ms": 195772.3,
+      "requests": 15,
+      "tokens": 8696,
+      "weighted_speed": 44.49249080036799,
+      "aggregate_speed": 44.41915871461906,
+      "ram_fetch": 36.06601770929162,
+      "mtp_hit": 0.8955688899146088,
+      "refresh_swaps": 1280,
+      "refresh_ms": 6213.061
+    }
+  ],
+  "correctness": {
+    "gate": "/home/caterpillar/fn/remote-stage-overlap-test-20261030d",
+    "logit_comparisons": 139,
+    "max_abs": 0,
+    "relative_l2": 0,
+    "all_picks_equal": true,
+    "checks": 21529004,
+    "cpu_ctest_passed": 4
+  },
+  "operational_config": "/home/caterpillar/fn/maya-config/resident-overlap-20261030",
+  "limits": [
+    "The same-stream overlap result is a small improvement, not 50 tok/s on the full coding workload.",
+    "Sparse first-window CUDA traces include waits and submission gaps, not pure kernel times.",
+    "The isolated DMA copy measurement is not model throughput and no DMA model engine is implemented in this change."
+  ],
+  "normal_run": "/home/caterpillar/fn/remote-prefill-runs/20261030-094610-93639",
+  "normal_qshort": {
+    "chat_tok_s": 54.0,
+    "code_tok_s": 51.6,
+    "greedy_md5": "3ced0d2040f5b85d5c70005348fb028f",
+    "harness_sha256": "278b008e7e6f889407f257b57725057fb61839a8dba025fbf09a38d1dc653a64",
+    "forced_output": false
+  }
+}

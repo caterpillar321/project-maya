@@ -335,6 +335,7 @@ void Glm5Model::win_free() {
     win_crew_stop();
     if (fast_ == nullptr) return;
     auto& W = fast_->win;
+    if (W.ev_fetch_ready && fast_->ps) cudaStreamSynchronize(fast_->ps);
     for (cudaEvent_t e : W.ev_tok)
         if (e) cudaEventDestroy(e);
     for (cudaEvent_t e : W.ev_pick)
@@ -346,6 +347,8 @@ void Glm5Model::win_free() {
     if (W.emb_h) cudaFreeHost(W.emb_h);
     if (W.hop_h) cudaFreeHost(W.hop_h);
     if (W.ev_hop) cudaEventDestroy(W.ev_hop);
+    if (W.ev_fetch_ready) cudaEventDestroy(W.ev_fetch_ready);
+    if (W.ev_fetch_done) cudaEventDestroy(W.ev_fetch_done);
     for (cudaEvent_t e : W.ev)
         if (e) cudaEventDestroy(e);
     if (W.uid) cudaFree(W.uid);
@@ -649,6 +652,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     // The full window must fit so its two groups cannot silently choose different scratch layouts.
     const bool private_scratch = F->win_scratch_rows > 0 && W.T <= F->win_scratch_rows &&
                                  W.T <= F->rows_group && F->rows_scr != nullptr && batched;
+    static const bool resident_overlap_env = [] {
+        const char* v = getenv("STRATA_GLM_WIN_RESIDENT_OVERLAP");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    const bool resident_overlap = resident_overlap_env && window_pf && private_scratch && T == 1 &&
+                                  !Ly.exl3 && !F->all_resident;
     // A full T2/T3 layer consumes every row before the next layer overwrites scratch. Staggered A(l+1) can
     // overwrite A(l) before B(l) computes, so split groups must never share these private weights.
     const bool fetch_reuse = F->win_fetch_reuse && private_scratch && batch_env && part == 0 &&
@@ -717,6 +726,18 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             if (route_ahead) mt.wait_seq = W.cpu_seq_w + 16 * t + 1;
             return mt;
         };
+        const auto make_mw = [&](const float* shared) {
+            gf::MoeWin mw;
+            mw.plan_ptr = W.mplan_ptr + 8 * t0; mw.plan_w = W.mplan_w + 8 * t0;
+            mw.cpu_part = W.mcpu_part + (size_t) E * t0; mw.cpu_flag = W.mcpu_flag + t0;
+            mw.xq = (const uint8_t*) W.xq + (size_t) t0 * W.xq_s; mw.xq_stride = W.xq_s;
+            mw.hq = W.whq; mw.part = W.wpart; mw.sh_out = shared;
+            mw.out = W.ffn + (size_t) t0 * E; mw.out_stride = (size_t) E;
+            mw.grp_ptr = W.grp_ptr; mw.grp_start = W.grp_start; mw.grp_ent = W.grp_ent; mw.n_groups = W.n_groups;
+            mw.T = T; mw.k = g.n_exp_used; mw.n_embd = E; mw.n_ff = g.n_ff_exp;
+            mw.limit = g.swiglu_exp; mw.down_off = Ly.down_off;
+            return mw;
+        };
         // this layer's scratch claims (word 1 stays sticky): all 8 slots free, or the group's 4 (words 8 / 9 hold the
         // claim words that leave a group only its own slots free)
         unsigned int* scr = W.scr + (gid == 1 ? 2 : 0);
@@ -741,9 +762,11 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
             if (!F->all_resident) {
                 gf::moe_wait(mt, E, s);
                 trace("moe_route_wait", t);
-                gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s,
-                              route_ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
-                trace(route_ahead ? "moe_fetch_disk_rows" : "moe_fetch_all", t);
+                if (!resident_overlap) {
+                    gf::moe_fetch(mt, g.n_exp_used, Ly.blob, s,
+                                  route_ahead ? gf::MoeFetchPhase::HasDiskMiss : gf::MoeFetchPhase::All);
+                    trace(route_ahead ? "moe_fetch_disk_rows" : "moe_fetch_all", t);
+                }
             }
             if (W.uid != nullptr) {
                 cudaMemcpyAsync(W.uid + ((size_t) (il - l0_) * kWinMax + t) * 8, mt.plan_id, 8 * sizeof(int),
@@ -756,6 +779,30 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                 gf::moe_fetch(tok_dev(t), g.n_exp_used, Ly.blob, s, gf::MoeFetchPhase::NoDiskMiss);
                 trace("moe_fetch_ram_rows", t);
             }
+        if (resident_overlap) {
+            // Prefetched pointers count as resident, so join their writes before using that group. Use the
+            // existing side stream for demand copies: a separate stream competing with speculative copies
+            // regressed the home agent replay. Only resident experts run before the demand completion event.
+            if (W.prefetch_pending && !glmfast::cuda_ok(cudaStreamWaitEvent(s, F->ev_pf_prev, 0),
+                                                       "resident overlap prior prefetch", err)) return false;
+            W.prefetch_pending = false;
+            if ((!W.ev_fetch_ready && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_ready, cudaEventDisableTiming),
+                                                       "resident overlap ready event", err)) ||
+                (!W.ev_fetch_done && !glmfast::cuda_ok(cudaEventCreateWithFlags(&W.ev_fetch_done, cudaEventDisableTiming),
+                                                      "resident overlap done event", err))) return false;
+            if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_ready, s), "resident overlap route ready", err) ||
+                !glmfast::cuda_ok(cudaStreamWaitEvent(F->ps, W.ev_fetch_ready, 0), "resident overlap copy wait", err)) return false;
+            gf::moe_fetch(tok_dev(t0), g.n_exp_used, Ly.blob, F->ps);
+            if (!glmfast::cuda_ok(cudaEventRecord(W.ev_fetch_done, F->ps), "resident overlap copies done", err)) return false;
+            gf::MoeWin ready = make_mw(nullptr);
+            ready.fetch_src = W.mfetch + 8 * t0; ready.fetch_phase = 1;
+            if (!gf::moe_win_experts(Ly.gu_type, Ly.d_type, ready, s)) {
+                err = "glm window: resident expert phase unsupported"; return false;
+            }
+            trace("moe_resident_experts");
+            if (!glmfast::cuda_ok(cudaStreamWaitEvent(s, W.ev_fetch_done, 0), "resident overlap demand join", err)) return false;
+            trace("moe_demand_join");
+        }
         if (window_pf) {
             // The previous layer installed pointers early; all of their bytes must arrive before use.
             if (W.prefetch_pending) {
@@ -875,28 +922,8 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                              W.ffn + (size_t) t * E, s);
             }
         } else {
-            gf::MoeWin mw;
-            mw.plan_ptr = W.mplan_ptr + 8 * t0;
-            mw.plan_w = W.mplan_w + 8 * t0;
-            mw.cpu_part = W.mcpu_part + (size_t) E * t0;
-            mw.cpu_flag = W.mcpu_flag + t0;
-            mw.xq = (const uint8_t*) W.xq + (size_t) t0 * W.xq_s;
-            mw.xq_stride = W.xq_s;
-            mw.hq = W.whq;
-            mw.part = W.wpart;
-            mw.sh_out = sh_out;
-            mw.out = W.ffn + (size_t) t0 * E;
-            mw.out_stride = (size_t) E;
-            mw.grp_ptr = W.grp_ptr;
-            mw.grp_start = W.grp_start;
-            mw.grp_ent = W.grp_ent;
-            mw.n_groups = W.n_groups;
-            mw.T = T;
-            mw.k = g.n_exp_used;
-            mw.n_embd = E;
-            mw.n_ff = g.n_ff_exp;
-            mw.limit = g.swiglu_exp;
-            mw.down_off = Ly.down_off;
+            gf::MoeWin mw = make_mw(sh_out);
+            if (resident_overlap) { mw.fetch_src = W.mfetch + 8 * t0; mw.fetch_phase = 2; }
             if (!gf::moe_win_experts(Ly.gu_type, Ly.d_type, mw, s)) {
                 err = "glm window: the batched experts (types " + std::to_string(Ly.gu_type) + " / " +
                       std::to_string(Ly.d_type) + ")";

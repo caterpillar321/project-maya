@@ -2,7 +2,7 @@
 # Start/stop the validated two-host GLM engine together. Never kill an unrecorded server.
 set -euo pipefail
 remote_stage_root="${MAYA_HOME_STAGE_ROOT:-$HOME/fn}"
-remote_stage_config="$remote_stage_root/maya-config/agent-adapt-20261030"
+remote_stage_config="$remote_stage_root/maya-config/resident-overlap-20261030"
 remote_stage_active="$remote_stage_root/remote-prefill-active-run.txt"
 case "${1:-start}" in
   start|restart)
@@ -11,13 +11,13 @@ case "${1:-start}" in
       python3 "$remote_stage_root/stop_remote_stage.py" "$(cat "$remote_stage_active")"
     fi
     remote_stage_run="$remote_stage_root/remote-prefill-runs/$(date +%Y%m%d-%H%M%S)-$$"
-    MAYA_STAGE_BENCH_BINARY="$remote_stage_root/bin/maya-agent-adapt-20261030" \
+    MAYA_STAGE_BENCH_BINARY="$remote_stage_root/bin/maya-resident-overlap-20261030" \
     MAYA_STAGE_TEST_GATE="$remote_stage_config" \
     MAYA_STAGE_CONFIG_TEMPLATE="$remote_stage_config/template.json" \
     MAYA_STAGE_SKIP_HARNESS=1 \
     MAYA_STAGE_SLOT_RAM_GB=2 \
-    MAYA_STAGE_BENCH_FRONT_EXTRA='{"MAYA_GLM_PREFILL_MIN":"32","MAYA_GLM_PREFILL_PIPE_ROWS":"8192"}' \
-    MAYA_STAGE_BENCH_EXTRA='{"MAYA_GLM_PREFILL_MIN":"32","MAYA_GLM_PREFILL_PIPE_ROWS":"8192","MAYA_GLM_STAGE_HELPER_REFRESH":"1","MAYA_GLM_STAGE_HELPER_REFRESH_AFTER":"1","MAYA_GLM_STAGE_HELPER_REFRESH_WIDE":"1","MAYA_GLM_STAGE_HELPER_REFRESH_MAX":"128","MAYA_GLM_WIN_HOST_PROF":"1"}' \
+    MAYA_STAGE_BENCH_FRONT_EXTRA='{"MAYA_GLM_PREFILL_MIN":"32","MAYA_GLM_PREFILL_PIPE_ROWS":"8192","MAYA_GLM_WIN_RESIDENT_OVERLAP":"0"}' \
+    MAYA_STAGE_BENCH_EXTRA='{"MAYA_GLM_PREFILL_MIN":"32","MAYA_GLM_PREFILL_PIPE_ROWS":"8192","MAYA_GLM_STAGE_HELPER_REFRESH":"1","MAYA_GLM_STAGE_HELPER_REFRESH_AFTER":"1","MAYA_GLM_STAGE_HELPER_REFRESH_WIDE":"1","MAYA_GLM_STAGE_HELPER_REFRESH_MAX":"128","MAYA_GLM_WIN_HOST_PROF":"1","MAYA_GLM_WIN_RESIDENT_OVERLAP":"1"}' \
       python3 "$remote_stage_root/run_remote_stage.py" "$remote_stage_run" 2
     printf '%s\n' "$remote_stage_run" > "$remote_stage_active.tmp"
     mv "$remote_stage_active.tmp" "$remote_stage_active"

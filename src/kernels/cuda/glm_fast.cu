@@ -6757,6 +6757,10 @@ template<int TG, int TU = TG>
 __global__ void __launch_bounds__(GU_WARPS * 32) moe_win_gu_kernel(const STRATA_GRID_CONSTANT MoeWin w) {
     const int g = blockIdx.y, chunk = blockIdx.x;
     if (g >= *w.n_groups) return;
+    if (w.fetch_phase != 0) {
+        const int entry = w.grp_ent[w.grp_start[g]];
+        if ((w.fetch_src[entry] != 0ull) != (w.fetch_phase == 2)) return;
+    }
     constexpr int NW = GU_WARPS;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     __shared__ float sg[GU_ROWS], su[GU_ROWS];
@@ -6808,6 +6812,10 @@ template<int TD>
 __global__ void __launch_bounds__(256) moe_win_down_kernel(const STRATA_GRID_CONSTANT MoeWin w) {
     const int g = blockIdx.y;
     if (g >= *w.n_groups) return;
+    if (w.fetch_phase != 0) {
+        const int entry = w.grp_ent[w.grp_start[g]];
+        if ((w.fetch_src[entry] != 0ull) != (w.fetch_phase == 2)) return;
+    }
     constexpr int NR = DOWN_ROWS;
     __shared__ uint32_t s_tab[TabWords<TD>::n > 0 ? TabWords<TD>::n : 1];
     load_tab<TD>(s_tab);
@@ -6849,7 +6857,8 @@ __global__ void moe_win_combine_kernel(const STRATA_GRID_CONSTANT MoeWin w) {
 
 bool moe_win_experts(int gu_type, int d_type, const MoeWin& w, cudaStream_t s) {
     if (w.T < 1 || w.T > kMaxWinTokens || w.k > 8 || w.n_ff % GU_ROWS != 0 || w.n_embd % DOWN_ROWS != 0) return false;
-    moe_win_group_kernel<<<1, 32, 0, s>>>(w);
+    if (w.fetch_phase < 0 || w.fetch_phase > 2 || (w.fetch_phase && (w.T != 1 || !w.fetch_src))) return false;
+    if (w.fetch_phase != 2) moe_win_group_kernel<<<1, 32, 0, s>>>(w);
     const int G = w.T * w.k;   // groups at most (the blocks past the real count return at once)
     const dim3 ggu((unsigned) (w.n_ff / GU_ROWS), (unsigned) G), gdn((unsigned) (w.n_embd / DOWN_ROWS), (unsigned) G);
     switch (gu_type) {
@@ -6868,7 +6877,8 @@ bool moe_win_experts(int gu_type, int d_type, const MoeWin& w, cudaStream_t s) {
 #undef GLMF_WDN
         default: return false;
     }
-    moe_win_combine_kernel<<<dim3((unsigned) ((w.n_embd + 255) / 256), (unsigned) w.T), 256, 0, s>>>(w);
+    if (w.fetch_phase != 1)
+        moe_win_combine_kernel<<<dim3((unsigned) ((w.n_embd + 255) / 256), (unsigned) w.T), 256, 0, s>>>(w);
     launch_check("moe_win_experts");
     return true;
 }

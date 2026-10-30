@@ -855,6 +855,15 @@ void Glm5Model::reset() {
     // waits on it - the next conversation's prompt read the previous one's state, and the memset landed in the middle
     // of it (#133: a conversation taken back from a slot answered the other one's question, then looped).
     if (fast_ != nullptr) {
+        // A failed overlap launch may return before its ordinary compute-stream join was enqueued.
+        // Do not let a later request reuse the private expert scratch while those copies are still running.
+        if (fast_->win.ev_fetch_ready && fast_->ps) {
+            const cudaError_t e = cudaStreamSynchronize(fast_->ps);
+            if (e != cudaSuccess) {
+                stage_failed_ = true;
+                std::fprintf(stderr, "glm reset: demand copy stream: %s\n", cudaGetErrorString(e));
+            }
+        }
         cudaMemsetAsync(state_, 0, state_bytes_, fast_->cs);
         kv_stream_reset_maps();   // (the zeroed slots hold no block now - on the same stream)
         if (cudaStreamSynchronize(fast_->cs) == cudaSuccess && fast_->route_error_h)
